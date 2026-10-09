@@ -43,7 +43,11 @@ public:
 	}
 
 	const char *getDescription() const override {
+		#ifdef USE_METAL
+		return "Comparing TinyGL output with Metal 3";
+#else
 		return "Comparing TinyGL output with classic OpenGL";
+#endif
 	}
 
 };

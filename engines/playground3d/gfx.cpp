@@ -115,6 +115,9 @@ Renderer *createRenderer(OSystem *system) {
 	Common::String rendererConfig = ConfMan.get("renderer");
 	Graphics::RendererType desiredRendererType = Graphics::Renderer::parseTypeCode(rendererConfig);
 	Graphics::RendererType matchingRendererType = Graphics::Renderer::getBestMatchingAvailableType(desiredRendererType,
+#ifdef USE_METAL
+			Graphics::kRendererTypeMetal |
+#endif
 #if defined(USE_OPENGL_GAME)
 			Graphics::kRendererTypeOpenGL |
 #endif
@@ -132,11 +135,15 @@ Renderer *createRenderer(OSystem *system) {
 	uint height = Renderer::kOriginalHeight;
 
 	if (isAccelerated) {
-		initGraphics3d(width, height);
+		initGraphics3d(width, height, matchingRendererType == Graphics::kRendererTypeMetal);
 	} else {
 		initGraphics(width, height, nullptr);
 	}
 
+#ifdef USE_METAL
+	if (matchingRendererType == Graphics::kRendererTypeMetal)
+		return CreateGfxMetal(system);
+#endif
 #if defined(USE_OPENGL_SHADERS)
 	if (matchingRendererType == Graphics::kRendererTypeOpenGLShaders) {
 		return CreateGfxOpenGLShader(system);

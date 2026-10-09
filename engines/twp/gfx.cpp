@@ -26,6 +26,10 @@
 
 namespace Twp {
 
+#ifdef USE_METAL
+bool usingMetal();
+#endif
+
 int Color::toInt() const {
 	int r = (rgba.r * 255.f);
 	int g = (rgba.g * 255.f);
@@ -53,6 +57,7 @@ Math::Matrix4 ortho(float left, float right, float bottom, float top, float zNea
 	return result;
 }
 
+#ifdef USE_OPENGL_SHADERS
 static GLint getFormat(int channels) {
 	switch (channels) {
 	case 3:
@@ -64,7 +69,21 @@ static GLint getFormat(int channels) {
 	}
 }
 
+#endif
+
 void Texture::load(const Graphics::Surface &surface) {
+#ifdef USE_METAL
+	if (usingMetal()) {
+		width = surface.w; height = surface.h;
+		if (_metalTarget && g_system->getMetalRenderer()->renderTarget() == _metalTarget.get())
+			g_system->getMetalRenderer()->setRenderTarget(nullptr);
+		_metalTarget.reset();
+		_metalTexture.reset(g_system->getMetalRenderer()->createTexture(surface));
+		if (!_metalTexture) error("TWP: could not upload native texture");
+		return;
+	}
+#endif
+#ifdef USE_OPENGL_SHADERS
 	width = surface.w;
 	height = surface.h;
 	const void *data = surface.getPixels();
@@ -77,17 +96,43 @@ void Texture::load(const Graphics::Surface &surface) {
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 	glPixelStorei(GL_UNPACK_ALIGNMENT, surface.format.bytesPerPixel);
 	GL_CALL(glTexImage2D(GL_TEXTURE_2D, 0, getFormat(surface.format.bytesPerPixel), width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, data));
+
+#else
+	error("TWP: no shader renderer available");
+#endif
 }
 
 void Texture::bind(const Texture *texture) {
+#ifdef USE_METAL
+	if (usingMetal()) return;
+#endif
+#ifdef USE_OPENGL_SHADERS
 	if (texture && texture->id) {
 		GL_CALL(glBindTexture(GL_TEXTURE_2D, texture->id));
 	} else {
 		GL_CALL(glBindTexture(GL_TEXTURE_2D, 0));
 	}
+
+#else
+	error("TWP: no shader renderer available");
+#endif
 }
 
 void Texture::capture(Common::Array<byte> &data) {
+#ifdef USE_METAL
+	if (usingMetal()) {
+		Graphics::Surface surface;
+		if (!metalTexture() || !g_system->getMetalRenderer()->readTexture(*metalTexture(), surface, Common::Rect(width, height)))
+			error("TWP: native texture readback failed");
+		// Preserve the engine's bottom-origin capture contract.
+		if (metalTarget()) surface.flipVertical(Common::Rect(width, height));
+		data.resize(width * height * 4);
+		for (int y = 0; y < height; ++y) memcpy(data.data() + y * width * 4, surface.getBasePtr(0, y), width * 4);
+		surface.free();
+		return;
+	}
+#endif
+#ifdef USE_OPENGL_SHADERS
 	data.resize(width * height * 4);
 	GLint boundFrameBuffer;
 
@@ -99,9 +144,22 @@ void Texture::capture(Common::Array<byte> &data) {
 	if (boundFrameBuffer != (int)fbo) {
 		glBindFramebuffer(GL_FRAMEBUFFER, boundFrameBuffer);
 	}
+
+#else
+	error("TWP: no shader renderer available");
+#endif
 }
 
 RenderTexture::RenderTexture(const Math::Vector2d &size) {
+#ifdef USE_METAL
+	if (usingMetal()) {
+		width = size.getX(); height = size.getY();
+		_metalTarget.reset(g_system->getMetalRenderer()->createRenderTarget(width, height));
+		if (!_metalTarget) error("TWP: could not allocate native render target");
+		return;
+	}
+#endif
+#ifdef USE_OPENGL_SHADERS
 	width = size.getX();
 	height = size.getY();
 
@@ -123,12 +181,29 @@ RenderTexture::RenderTexture(const Math::Vector2d &size) {
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, id, 0);
 	assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+#else
+	error("TWP: no shader renderer available");
+#endif
 }
 
 RenderTexture::~RenderTexture() {
+#ifdef USE_METAL
+	if (_metalTarget) {
+		if (g_system->getMetalRenderer())
+			g_system->getMetalRenderer()->setRenderTarget(nullptr);
+		_metalTarget.reset();
+		return;
+	}
+#endif
+#ifdef USE_OPENGL_SHADERS
 	glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	glDeleteTextures(1, &id);
 	glDeleteFramebuffers(1, &fbo);
+
+#else
+	error("TWP: no shader renderer available");
+#endif
 }
 
 Shader::Shader() {
@@ -138,6 +213,10 @@ Shader::~Shader() {
 }
 
 void Shader::init(const char *name, const char *vertex, const char *fragment) {
+#ifdef USE_METAL
+	if (usingMetal()) { initMetal(name, fragment); return; }
+#endif
+#ifdef USE_OPENGL_SHADERS
 	const char *attributes[] = {"a_position", "a_color", "a_texCoords", nullptr};
 	_shader.loadFromStrings(name, vertex, fragment, attributes, 110);
 
@@ -145,45 +224,121 @@ void Shader::init(const char *name, const char *vertex, const char *fragment) {
 	_shader.enableVertexAttribute("a_position", vbo, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (uint32)0);
 	_shader.enableVertexAttribute("a_color", vbo, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), (uint32)(2 * sizeof(float)));
 	_shader.enableVertexAttribute("a_texCoords", vbo, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (uint32)(6 * sizeof(float)));
+
+#else
+	error("TWP: no shader renderer available");
+#endif
 }
 
 int Shader::getUniformLocation(const char *name) const {
+#ifdef USE_METAL
+	if (_metalShader) return !strcmp(name, "u_texture2") ? 1 : 0;
+#endif
+#ifdef USE_OPENGL_SHADERS
 	return _shader.getUniformLocation(name);
+
+#else
+	error("TWP: no shader renderer available");
+#endif
 }
 
 void Shader::setUniform(const char *name, int value) {
+#ifdef USE_METAL
+	if (_metalShader) { float number = value; setMetalUniform(name, &number, 1, 1); return; }
+#endif
+#ifdef USE_OPENGL_SHADERS
 	_shader.setUniform(name, value);
+
+#else
+	error("TWP: no shader renderer available");
+#endif
 }
 
 void Shader::setUniform(const char *name, float value) {
+#ifdef USE_METAL
+	if (_metalShader) { setMetalUniform(name, &value, 1, 1); return; }
+#endif
+#ifdef USE_OPENGL_SHADERS
 	_shader.setUniform1f(name, value);
+
+#else
+	error("TWP: no shader renderer available");
+#endif
 }
 
 void Shader::setUniform(const char *name, float *value, size_t count) {
+#ifdef USE_METAL
+	if (_metalShader) { setMetalUniform(name, value, count, 1); return; }
+#endif
+#ifdef USE_OPENGL_SHADERS
 	GLint loc = _shader.getUniformLocation(name);
 	GL_CALL(glUniform1fv(loc, count, value));
+
+#else
+	error("TWP: no shader renderer available");
+#endif
 }
 
 void Shader::setUniform2(const char *name, float *value, size_t count) {
+#ifdef USE_METAL
+	if (_metalShader) { setMetalUniform(name, value, count, 2); return; }
+#endif
+#ifdef USE_OPENGL_SHADERS
 	GLint loc = _shader.getUniformLocation(name);
 	GL_CALL(glUniform2fv(loc, count, value));
+
+#else
+	error("TWP: no shader renderer available");
+#endif
 }
 
 void Shader::setUniform3(const char *name, float *value, size_t count) {
+#ifdef USE_METAL
+	if (_metalShader) { setMetalUniform(name, value, count, 3); return; }
+#endif
+#ifdef USE_OPENGL_SHADERS
 	GLint loc = _shader.getUniformLocation(name);
 	GL_CALL(glUniform3fv(loc, count, value));
+
+#else
+	error("TWP: no shader renderer available");
+#endif
 }
 
 void Shader::setUniform(const char *name, Math::Vector2d value) {
+#ifdef USE_METAL
+	if (_metalShader) { float numbers[] = {value.getX(), value.getY()}; setMetalUniform(name, numbers, 1, 2); return; }
+#endif
+#ifdef USE_OPENGL_SHADERS
 	_shader.setUniform(name, value);
+
+#else
+	error("TWP: no shader renderer available");
+#endif
 }
 
 void Shader::setUniform3(const char *name, Color value) {
+#ifdef USE_METAL
+	if (_metalShader) { setMetalUniform(name, value.v, 1, 3); return; }
+#endif
+#ifdef USE_OPENGL_SHADERS
 	_shader.setUniform(name, Math::Vector3d(value.v));
+
+#else
+	error("TWP: no shader renderer available");
+#endif
 }
 
 void Shader::setUniform4(const char *name, Color value) {
+#ifdef USE_METAL
+	if (_metalShader) { setMetalUniform(name, value.v, 1, 4); return; }
+#endif
+#ifdef USE_OPENGL_SHADERS
 	_shader.setUniform(name, Math::Vector4d(value.v));
+
+#else
+	error("TWP: no shader renderer available");
+#endif
 }
 
 void Gfx::init() {
@@ -195,10 +350,19 @@ void Gfx::init() {
 	empty.setPixels(pixels);
 	_emptyTexture.load(empty);
 
+#ifdef USE_OPENGL_SHADERS
+#ifdef USE_METAL
+	if (!usingMetal()) {
+#endif
 	GL_CALL(glGenBuffers(1, &_vbo));
 	GL_CALL(glGenBuffers(1, &_ebo));
 	GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, _vbo));
 	GL_CALL(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _ebo));
+
+#ifdef USE_METAL
+	}
+#endif
+#endif
 
 	const char *fragmentSrc = R"(
 		varying vec4 v_color;
@@ -212,13 +376,29 @@ void Gfx::init() {
 	_shader = &_defaultShader;
 	_mvp = ortho(-1.f, 1.f, -1.f, 1.f, -1.f, 1.f);
 
+#ifdef USE_OPENGL_SHADERS
+#ifdef USE_METAL
+	if (!usingMetal()) {
+#endif
 	glBindBuffer(GL_ARRAY_BUFFER, 0);
 	glGetIntegerv(GL_FRAMEBUFFER_BINDING, &_oldFbo);
+#ifdef USE_METAL
+	}
+#endif
+#endif
 }
 
 void Gfx::clear(const Color &color) {
+#ifdef USE_METAL
+	if (usingMetal()) { g_system->getMetalRenderer()->clear(color.rgba.r, color.rgba.g, color.rgba.b, color.rgba.a, true, false, false); return; }
+#endif
+#ifdef USE_OPENGL_SHADERS
 	glClearColor(color.rgba.r, color.rgba.g, color.rgba.b, color.rgba.a);
 	glClear(GL_COLOR_BUFFER_BIT);
+
+#else
+	error("TWP: no shader renderer available");
+#endif
 }
 
 Math::Matrix4 Gfx::getFinalTransform(const Math::Matrix4 &trsf) {
@@ -228,21 +408,33 @@ Math::Matrix4 Gfx::getFinalTransform(const Math::Matrix4 &trsf) {
 }
 
 void Gfx::noTexture() {
+#ifdef USE_METAL
+	if (usingMetal()) { _texture = &_emptyTexture; return; }
+#endif
+#ifdef USE_OPENGL_SHADERS
 	_texture = &_emptyTexture;
 	GL_CALL(glBindTexture(GL_TEXTURE_2D, _emptyTexture.id));
+
+#else
+	error("TWP: no shader renderer available");
+#endif
 }
 
 void Gfx::drawLines(Vertex *vertices, int count, const Math::Matrix4 &trsf) {
 	noTexture();
-	drawPrimitives(GL_LINE_STRIP, vertices, count, trsf);
+	drawPrimitives(kPrimitiveLineStrip, vertices, count, trsf);
 }
 
 void Gfx::drawLinesLoop(Vertex *vertices, int count, const Math::Matrix4 &trsf) {
 	noTexture();
-	drawPrimitives(GL_LINE_LOOP, vertices, count, trsf);
+	drawPrimitives(kPrimitiveLineLoop, vertices, count, trsf);
 }
 
 void Gfx::drawPrimitives(uint32 primitivesType, Vertex *vertices, int v_size, const Math::Matrix4 &trsf, Texture *texture) {
+#ifdef USE_METAL
+	if (usingMetal()) { drawMetal(primitivesType, vertices, v_size, nullptr, 0, trsf, texture); return; }
+#endif
+#ifdef USE_OPENGL_SHADERS
 	if (v_size > 0) {
 		_texture = texture ? texture : &_emptyTexture;
 		GL_CALL(glBindTexture(GL_TEXTURE_2D, _texture->id));
@@ -273,9 +465,17 @@ void Gfx::drawPrimitives(uint32 primitivesType, Vertex *vertices, int v_size, co
 
 		glDisable(GL_BLEND);
 	}
+
+#else
+	error("TWP: no shader renderer available");
+#endif
 }
 
 void Gfx::drawPrimitives(uint32 primitivesType, Vertex *vertices, int v_size, uint32 *indices, int i_size, const Math::Matrix4 &trsf, Texture *texture) {
+#ifdef USE_METAL
+	if (usingMetal()) { drawMetal(primitivesType, vertices, v_size, indices, i_size, trsf, texture); return; }
+#endif
+#ifdef USE_OPENGL_SHADERS
 	if (i_size > 0) {
 		int num = _shader->getNumTextures();
 		if (num == 0) {
@@ -319,10 +519,14 @@ void Gfx::drawPrimitives(uint32 primitivesType, Vertex *vertices, int v_size, ui
 		glBindBuffer(GL_ARRAY_BUFFER, 0);
 		glDisable(GL_BLEND);
 	}
+
+#else
+	error("TWP: no shader renderer available");
+#endif
 }
 
 void Gfx::draw(Vertex *vertices, int v_size, uint32 *indices, int i_size, const Math::Matrix4 &trsf, Texture *texture) {
-	drawPrimitives(GL_TRIANGLES, vertices, v_size, indices, i_size, trsf, texture);
+	drawPrimitives(kPrimitiveTriangles, vertices, v_size, indices, i_size, trsf, texture);
 }
 
 void Gfx::drawQuad(const Math::Vector2d &size, const Color &color, const Math::Matrix4 &trsf) {
@@ -382,6 +586,15 @@ void Gfx::use(Shader *shader) {
 }
 
 void Gfx::setRenderTarget(RenderTexture *target) {
+#ifdef USE_METAL
+	if (usingMetal()) {
+		Graphics::Metal::Renderer &metal = *g_system->getMetalRenderer();
+		metal.setRenderTarget(target ? target->metalTarget() : nullptr);
+		metal.setViewport(Common::Rect(metal.width(), metal.height()));
+		return;
+	}
+#endif
+#ifdef USE_OPENGL_SHADERS
 	if (!target) {
 		glBindFramebuffer(GL_FRAMEBUFFER, _oldFbo);
 		int w = g_twp->_system->getWidth();
@@ -391,6 +604,10 @@ void Gfx::setRenderTarget(RenderTexture *target) {
 		glBindFramebuffer(GL_FRAMEBUFFER, target->fbo);
 		glViewport(0, 0, target->width, target->height);
 	}
+
+#else
+	error("TWP: no shader renderer available");
+#endif
 }
 
 } // namespace Twp

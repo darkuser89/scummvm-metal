@@ -35,6 +35,7 @@ bool areShadersAvailable();
 Common::ScopedPtr<Graphics::Surface> createViewportScreenshot();
 
 bool useOpenGL();
+bool useMetal();
 
 } // namespace Hpl1
 

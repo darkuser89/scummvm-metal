@@ -125,6 +125,10 @@ MODULE_OBJS := \
 	visual/smacker.o \
 	visual/text.o
 
+ifdef USE_METAL
+MODULE_OBJS += gfx/metal.o
+endif
+
 ifdef USE_TINYGL
 MODULE_OBJS += \
 	gfx/tinygl.o \

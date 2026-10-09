@@ -80,7 +80,7 @@ void initGraphics(int width, int height, const Common::List<Graphics::PixelForma
 /**
  * @overload
  */
-void initGraphics3d(int width, int height);
+void initGraphics3d(int width, int height, bool metal = false);
 
 /**
  * Inits any of the modes in "modes". "modes" is in the order of preference.

@@ -25,6 +25,10 @@ MODULE_OBJS = \
 	sounds.o \
 	ui-objects.o
 
+ifdef USE_METAL
+MODULE_OBJS += graphics-metal.o
+endif
+
 ifdef USE_OPENGL_GAME
 MODULE_OBJS += graphics-opengl.o
 else # create_project cannot handle else and ifdef on the same line

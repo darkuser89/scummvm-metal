@@ -59,9 +59,11 @@ TetraedgeEngine::~TetraedgeEngine() {
 	delete _core;
 	delete _game;
 	delete _application;
-	delete _renderer;
+	// Dialog members can queue layouts from their destructors, after the
+	// application's explicit destroy(). Their callbacks need the input
+	// manager while the layouts are released.
+	TeObject::deleteNow();
 	delete _soundManager;
-	delete _resourceManager;
 	delete _inputMgr;
 	for (Common::Array<Common::Archive *>::iterator it = _rootArchives.begin(); it != _rootArchives.end(); it++)
 		delete *it;
@@ -72,6 +74,14 @@ TetraedgeEngine::~TetraedgeEngine() {
 	TeTimer::cleanup();
 	TeObject::cleanup();
 	TeParticle::cleanup();
+	// Cached models and textures release their renderer bindings during
+	// cleanup. Keep the renderer alive until those resources are gone.
+	delete _renderer;
+	_renderer = nullptr;
+	// Renderer materials also hold TeResource references. Their destructors
+	// unregister from this manager, so it must outlive the renderer too.
+	delete _resourceManager;
+	_resourceManager = nullptr;
 }
 
 /*static*/
@@ -318,6 +328,9 @@ Common::Error TetraedgeEngine::run() {
 	_game->leave(true);
 	TeObject::deleteNow();
 	_application->destroy();
+	// Menu destruction queues layouts that still need the input manager,
+	// renderer and resource manager while unregistering their callbacks.
+	TeObject::deleteNow();
 
 	return Common::kNoError;
 }
@@ -342,6 +355,9 @@ Graphics::RendererType TetraedgeEngine::preferredRendererType() const {
 	uint32 availableRendererTypes = Graphics::Renderer::getAvailableTypes();
 
 	availableRendererTypes &=
+#ifdef USE_METAL
+			Graphics::kRendererTypeMetal |
+#endif
 #if defined(USE_OPENGL_GAME)
 			Graphics::kRendererTypeOpenGL |
 #endif

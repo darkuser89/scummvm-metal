@@ -85,6 +85,7 @@ EventRecorder::EventRecorder() {
 	_playbackFile = nullptr;
 	_recordFile = nullptr;
 	_playbackQuitPosted = false;
+	_playbackQuitPending = false;
 }
 
 EventRecorder::~EventRecorder() {
@@ -139,7 +140,7 @@ void EventRecorder::processTimeAndDate(TimeDate &td, bool skipRecord) {
 	if (!_initialized) {
 		return;
 	}
-	if ((_recordMode == kRecorderPlayback || _recordMode == kRecorderUpdate) && _nextEvent.type == Common::EVENT_QUIT) {
+	if ((_recordMode == kRecorderPlayback || _recordMode == kRecorderUpdate) && (_playbackQuitPosted || _nextEvent.type == Common::EVENT_QUIT)) {
 		postPlaybackQuit();
 		return;
 	}
@@ -189,7 +190,7 @@ void EventRecorder::processMillis(uint32 &millis, bool skipRecord) {
 	if (!_initialized) {
 		return;
 	}
-	if ((_recordMode == kRecorderPlayback || _recordMode == kRecorderUpdate) && _nextEvent.type == Common::EVENT_QUIT) {
+	if ((_recordMode == kRecorderPlayback || _recordMode == kRecorderUpdate) && (_playbackQuitPosted || _nextEvent.type == Common::EVENT_QUIT)) {
 		postPlaybackQuit();
 		return;
 	}
@@ -282,7 +283,7 @@ void EventRecorder::processScreenUpdate() {
 		break;
 	case kRecorderUpdate: // fallthrough
 	case kRecorderPlayback:
-		if (_nextEvent.type == Common::EVENT_QUIT) {
+		if (_playbackQuitPosted || _nextEvent.type == Common::EVENT_QUIT) {
 			postPlaybackQuit();
 			return;
 		}
@@ -337,8 +338,15 @@ bool EventRecorder::pollEvent(Common::Event &ev) {
 
 	if (_nextEvent.type == Common::EVENT_QUIT) {
 		postPlaybackQuit();
-		return false;
 	}
+	if (_playbackQuitPending) {
+		_playbackQuitPending = false;
+		ev = Common::Event();
+		ev.type = Common::EVENT_QUIT;
+		return true;
+	}
+	if (_playbackQuitPosted)
+		return false;
 	if (_nextEvent.recordedtype == Common::kRecorderEventTypeTimer
 	 || _nextEvent.recordedtype == Common::kRecorderEventTypeTimeDate
 	 || _nextEvent.recordedtype == Common::kRecorderEventTypeScreenUpdate
@@ -369,11 +377,15 @@ void EventRecorder::postPlaybackQuit() {
 	if (_playbackQuitPosted)
 		return;
 
-	Common::Event quitEvent;
-	quitEvent.type = Common::EVENT_QUIT;
-	g_system->getEventManager()->pushEvent(quitEvent);
+	// Playback ignores all existing event sources, including the artificial
+	// source used by pushEvent(). Deliver EOF through this active source.
+	_playbackQuitPending = true;
 	_playbackQuitPosted = true;
 	_nextEvent.type = Common::EVENT_INVALID;
+	// The recording has ended. Engines may reset the first quit event and
+	// push another after their confirmation handling (SCUMM's original GUI
+	// does this even with confirmation disabled). Let that event through.
+	g_system->getEventManager()->getEventDispatcher()->ignoreSources(false);
 	debugC(1, kDebugLevelEventRec, "playback:action=post-quit reason=EOF");
 }
 
@@ -445,6 +457,7 @@ void EventRecorder::init(const Common::String &recordFileName, RecordMode mode) 
 	_fakeMixerManager->suspendAudio();
 	_fakeTimer = 0;
 	_playbackQuitPosted = false;
+	_playbackQuitPending = false;
 	_lastMillis = g_system->getMillis();
 	_lastScreenshotTime = 0;
 	_recordMode = mode;
@@ -534,17 +547,30 @@ bool EventRecorder::checkGameHash(const ADGameDescription *gameDesc) {
 		if (fileDesc->md5 == nullptr)
 			continue;
 
-		if (_playbackFile->getHeader().hashRecords.find(fileDesc->fileName) == _playbackFile->getHeader().hashRecords.end()) {
+		// Hash chunks end with exactly 32 digest bytes. Detector prefixes such
+		// as "d:" describe the hash source, and are not part of the digest.
+		const char *prefixEnd = strchr(fileDesc->md5, ':');
+		const char *digest = prefixEnd ? prefixEnd + 1 : fileDesc->md5;
+		auto &hashes = _playbackFile->getHeader().hashRecords;
+		auto stored = hashes.find(fileDesc->fileName);
+		// Older recordings wrote the prefix into the chunk; their reader
+		// consequently appended it to the filename. Accept that exact key.
+		if (stored == hashes.end() && prefixEnd) {
+			Common::String legacyKey = fileDesc->fileName;
+			legacyKey += Common::String(fileDesc->md5, prefixEnd + 1);
+			stored = hashes.find(legacyKey);
+		}
+		if (stored == hashes.end()) {
 			warning("MD5 hash for file %s not found in record file", fileDesc->fileName);
 			debugC(1, kDebugLevelEventRec, "playback:action=\"Check game hash\" filename=%s filehash=%s storedhash=\"\" result=different", fileDesc->fileName, fileDesc->md5);
 			return false;
 		}
-		if (_playbackFile->getHeader().hashRecords[fileDesc->fileName] != fileDesc->md5) {
-			warning("Incorrect version of game file %s. Stored MD5 is %s. MD5 of loaded game is %s", fileDesc->fileName, _playbackFile->getHeader().hashRecords[fileDesc->fileName].c_str(), fileDesc->md5);
-			debugC(1, kDebugLevelEventRec, "playback:action=\"Check game hash\" filename=%s filehash=%s storedhash=%s result=different", fileDesc->fileName, fileDesc->md5, _playbackFile->getHeader().hashRecords[fileDesc->fileName].c_str());
+		if (stored->_value != digest) {
+			warning("Incorrect version of game file %s. Stored MD5 is %s. MD5 of loaded game is %s", fileDesc->fileName, stored->_value.c_str(), fileDesc->md5);
+			debugC(1, kDebugLevelEventRec, "playback:action=\"Check game hash\" filename=%s filehash=%s storedhash=%s result=different", fileDesc->fileName, fileDesc->md5, stored->_value.c_str());
 			return false;
 		}
-		debugC(1, kDebugLevelEventRec, "playback:action=\"Check game hash\" filename=%s filehash=%s storedhash=%s result=equal", fileDesc->fileName, fileDesc->md5, _playbackFile->getHeader().hashRecords[fileDesc->fileName].c_str());
+		debugC(1, kDebugLevelEventRec, "playback:action=\"Check game hash\" filename=%s filehash=%s storedhash=%s result=equal", fileDesc->fileName, fileDesc->md5, stored->_value.c_str());
 	}
 	return true;
 }
@@ -732,7 +758,8 @@ bool EventRecorder::notifyEvent(const Common::Event &ev) {
 void EventRecorder::setGameMd5(const ADGameDescription *gameDesc) {
 	for (const ADGameFileDescription *fileDesc = gameDesc->filesDescriptions; fileDesc->fileName; fileDesc++) {
 		if (fileDesc->md5 != nullptr) {
-			_recordFile->getHeader().hashRecords[fileDesc->fileName] = fileDesc->md5;
+			const char *prefixEnd = strchr(fileDesc->md5, ':');
+			_recordFile->getHeader().hashRecords[fileDesc->fileName] = prefixEnd ? prefixEnd + 1 : fileDesc->md5;
 		}
 	}
 }
@@ -776,6 +803,8 @@ bool EventRecorder::grabScreenAndComputeMD5(Graphics::Surface &screen, uint8 md5
 Common::SeekableReadStream *EventRecorder::processSaveStream(const Common::String &fileName) {
 	Common::InSaveFile *saveFile;
 	switch (_recordMode) {
+	case kPassthrough:
+		return _realSaveManager->openForLoading(fileName);
 	case kRecorderPlayback:
 		debugC(1, kDebugLevelEventRec, "playback:action=\"Process save file\" filename=%s len=%d", fileName.c_str(), _playbackFile->getHeader().saveFiles[fileName].size);
 		return new Common::MemoryReadStream(_playbackFile->getHeader().saveFiles[fileName].buffer, _playbackFile->getHeader().saveFiles[fileName].size);

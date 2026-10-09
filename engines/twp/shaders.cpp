@@ -355,8 +355,8 @@ FadeShader::FadeShader() {
 	})";
 	init("fadeShader", vsrc, fadeShader);
 
-	GL_CALL(_textureLoc[0] = getUniformLocation("u_texture"));
-	GL_CALL(_textureLoc[1] = getUniformLocation("u_texture2"));
+	_textureLoc[0] = getUniformLocation("u_texture");
+	_textureLoc[1] = getUniformLocation("u_texture2");
 }
 
 FadeShader::~FadeShader() {}
@@ -382,6 +382,10 @@ int FadeShader::getTexture(int index) {
 }
 
 int FadeShader::getTextureLoc(int index) { return _textureLoc[index]; }
+
+Texture *FadeShader::getTextureObject(int index) {
+	return index == 0 ? _texture1 : index == 1 ? _texture2 : nullptr;
+}
 
 void ShaderParams::updateShader() {
 	if (effect == RoomEffect::Sepia) {

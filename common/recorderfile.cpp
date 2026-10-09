@@ -774,6 +774,10 @@ void PlaybackFile::skipHeader() {
 void PlaybackFile::addSaveFile(const String &fileName, InSaveFile *saveStream) {
 	uint oldPos = saveStream->pos();
 	saveStream->seek(0);
+	// Save choosers may reopen a file repeatedly while recording. Keep only
+	// the latest snapshot instead of leaking each previous buffer.
+	if (_header.saveFiles.contains(fileName))
+		free(_header.saveFiles[fileName].buffer);
 	_header.saveFiles[fileName].buffer = (byte *)malloc(saveStream->size());
 	_header.saveFiles[fileName].size = saveStream->size();
 	saveStream->read(_header.saveFiles[fileName].buffer, saveStream->size());

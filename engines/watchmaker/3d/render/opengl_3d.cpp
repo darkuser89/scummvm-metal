@@ -33,9 +33,14 @@
 #include "watchmaker/globvar.h"
 #include "watchmaker/work_dirs.h"
 
-#ifdef USE_OPENGL_GAME
+#if defined(USE_OPENGL_GAME) || defined(USE_METAL)
 
+#ifdef USE_OPENGL_GAME
 #include "graphics/opengl/system_headers.h"
+#endif
+#ifdef USE_METAL
+#include "watchmaker/3d/render/metal.h"
+#endif
 #include "watchmaker/3d/render/shadows.h"
 #include "watchmaker/file_utils.h"
 #include "watchmaker/tga_util.h"

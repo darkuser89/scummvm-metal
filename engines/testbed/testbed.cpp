@@ -58,7 +58,7 @@
 #ifdef USE_IMGUI
 #include "testbed/imgui.h"
 #endif
-#if defined USE_TINYGL && defined USE_OPENGL_GAME
+#if defined(USE_TINYGL) && (defined(USE_OPENGL_GAME) || defined(USE_METAL))
 #include "testbed/tinygl.h"
 #endif
 
@@ -199,7 +199,7 @@ void TestbedEngine::pushTestsuites(Common::Array<Testsuite *> &testsuiteList) {
 	// Video decoder
 	ts = new VideoDecoderTestSuite();
 	testsuiteList.push_back(ts);
-#if defined USE_TINYGL && defined USE_OPENGL_GAME
+#if defined(USE_TINYGL) && (defined(USE_OPENGL_GAME) || defined(USE_METAL))
 	// TinyGL
 	ts = new TinyGLTestSuite();
 	testsuiteList.push_back(ts);

@@ -40,6 +40,8 @@ SAVED_CXXFILT=$CXXFILT
 SAVED_DWP=$DWP
 SAVED_LD=$LD
 SAVED_LDFLAGS=$LDFLAGS
+SAVED_METAL_SHADER_CFLAGS=$METAL_SHADER_CFLAGS
+SAVED_METAL_SHADER_LIBS=$METAL_SHADER_LIBS
 SAVED_NM=$NM
 SAVED_PKG_CONFIG_LIBDIR=${PKG_CONFIG_LIBDIR:-unset}
 SAVED_RANLIB=$RANLIB
@@ -182,6 +184,7 @@ _sonivox=auto
 _opengl_mode=auto
 _opengl_game_classic=auto
 _opengl_game_shaders=auto
+_metal=auto
 _tinygl=yes
 _readline=auto
 _freetype2=auto
@@ -335,6 +338,9 @@ add_feature jpeg "JPEG" "_jpeg"
 add_feature mad "MAD" "_mad"
 add_feature opengl_game_classic "OpenGL (classic)" "_opengl_game_classic"
 add_feature opengl_game_shaders "OpenGL with shaders" "_opengl_game_shaders"
+add_feature metal "Metal 3" "_metal"
+add_feature game_shaders "Game rendering with shaders" "_opengl_game_shaders _metal"
+add_feature game_classic "Classic game rendering" "_opengl_game_classic _metal"
 add_feature png "PNG" "_png"
 add_feature vorbis "Vorbis file support" "_vorbis _tremor"
 add_feature zlib "zlib" "_zlib"
@@ -1072,6 +1078,8 @@ Optional Features:
   --enable-tts             build support for text to speech
   --disable-tts            don't build support for text to speech
   --disable-bink           don't build with Bink video support
+  --enable-metal          build native Metal 3 output (macOS 13+, arm64, SDL2)
+  --disable-metal         don't build native Metal 3 output
   --opengl-mode=MODE       OpenGL (ES) mode to use for OpenGL output [auto]
                            available modes: auto for autodetection
                                             none for disabling any OpenGL usage
@@ -1247,6 +1255,8 @@ Some influential environment variables:
   LD                 linker command
   LDFLAGS            linker flags, e.g. -L<lib dir> if you have libraries in a
                      nonstandard directory <lib dir>
+  METAL_SHADER_CFLAGS include flags for shaderc and SPIRV-Cross
+  METAL_SHADER_LIBS   link flags for the native Metal preset compiler
   NM                 list symbols command
   PKG_CONFIG_LIBDIR  list of directories where pkg-config '.pc' files are
                      looked up
@@ -1407,6 +1417,8 @@ for ac_option in $@; do
 	--disable-gtk)                _gtk=no                ;;
 	--disable-imgui)              _imgui=no              ;;
 	--enable-imgui)               _imgui=yes             ;;
+	--enable-metal)               _metal=yes             ;;
+	--disable-metal)              _metal=no              ;;
 	--opengl-mode=*)
 		_opengl_mode=`echo $ac_option | cut -d '=' -f 2`
 		;;
@@ -6291,7 +6303,13 @@ if test "$_libopenmpt" != "no"; then
 			return 0;
 		}
 EOF
-		cc_check $LIBOPENMPT_CFLAGS $LIBOPENMPT_LIBS && _libopenmpt=yes
+		cc_check_no_clean $LIBOPENMPT_CFLAGS $LIBOPENMPT_LIBS && _libopenmpt=yes
+		if test "$_libopenmpt" != "yes" && test "$_pkg_config" = "yes" && $_pkgconfig --exists libopenmpt; then
+			# Static archives also need the codec libraries from Requires.private.
+			LIBOPENMPT_LIBS="`$_pkgconfig --static --libs libopenmpt`"
+			cc_check_no_clean $LIBOPENMPT_CFLAGS $LIBOPENMPT_LIBS && _libopenmpt=yes
+		fi
+		cc_check_clean
 	fi
 
 	if test "$_libopenmpt" = "yes"; then
@@ -6799,6 +6817,69 @@ echocheck "FreeType2"
 echo "$_freetype2"
 
 define_in_config_if_yes "$_freetype2" "USE_FREETYPE2"
+
+# Native Metal 3 is restricted to macOS on Apple Silicon with SDL 2.0.14+.
+_metal_requested=$_metal
+if test "$_metal" != no; then
+	_metal=no
+	case "$_host_os:$_host_cpu:$_backend:$_sdlversion" in
+	darwin*:aarch64:sdl:2.*)
+		cat > $TMPC << EOF
+#include <AvailabilityMacros.h>
+#include <SDL.h>
+#if !defined(__arm64__) || MAC_OS_X_VERSION_MAX_ALLOWED < 130000
+#error Metal 3 requires an arm64 macOS 13 SDK or later
+#endif
+#if !SDL_VERSION_ATLEAST(2, 0, 14)
+#error Metal output requires SDL 2.0.14 or later
+#endif
+int main() { return 0; }
+EOF
+		if cc_check $SDL_CFLAGS -framework Metal -framework MetalFX -framework QuartzCore; then
+			# Full Metal output includes native translation of the existing
+			# RetroArch GLSL preset collection, without an OpenGL context.
+			if test "$_pkg_config" = yes && $_pkgconfig --exists shaderc spirv-cross-c-shared; then
+				METAL_SHADER_CFLAGS=${METAL_SHADER_CFLAGS:-"`$_pkgconfig --cflags shaderc spirv-cross-c-shared`"}
+				METAL_SHADER_LIBS=${METAL_SHADER_LIBS:-"`$_pkgconfig --libs shaderc spirv-cross-c-shared`"}
+			else
+				METAL_SHADER_CFLAGS=${METAL_SHADER_CFLAGS:-"-I/opt/homebrew/include"}
+				METAL_SHADER_LIBS=${METAL_SHADER_LIBS:-"-L/opt/homebrew/lib -lshaderc_shared -lspirv-cross-c-shared"}
+			fi
+			cat > $TMPC << EOF
+#include <shaderc/shaderc.h>
+#include <spirv_cross/spirv_cross_c.h>
+int main() {
+ shaderc_compiler_t shader = shaderc_compiler_initialize();
+ spvc_context context = 0;
+ spvc_context_create(&context);
+ shaderc_compiler_release(shader);
+ spvc_context_destroy(context);
+ return 0;
+}
+EOF
+			if ! cc_check $METAL_SHADER_CFLAGS $METAL_SHADER_LIBS; then
+				echo "Metal presets require shaderc and the SPIRV-Cross C shared library."
+				echo "Set METAL_SHADER_CFLAGS and METAL_SHADER_LIBS for their installation."
+				exit 1
+			fi
+			_metal=yes
+			append_var INCLUDES "$METAL_SHADER_CFLAGS"
+			append_var LIBS "$METAL_SHADER_LIBS"
+			append_var CXXFLAGS "-mmacosx-version-min=13.0"
+			append_var LDFLAGS "-mmacosx-version-min=13.0"
+			append_var LIBS "-framework Metal -framework MetalFX -framework QuartzCore"
+			append_var LIBS_3D "-framework Metal -framework MetalFX -framework QuartzCore"
+		fi
+		;;
+	esac
+	if test "$_metal_requested" = yes -a "$_metal" != yes; then
+		echo "Metal 3 requires macOS 13+, an arm64 target and SDL 2.0.14+"
+		exit 1
+	fi
+fi
+echocheck "Metal 3 (Apple M1-M6)"
+echo "$_metal"
+define_in_config_if_yes "$_metal" "USE_METAL"
 
 
 #
@@ -7497,7 +7578,7 @@ fi
 echo "$_tinygl"
 
 echo_n "Building any 3D game... "
-if test "$_tinygl" = yes || test "$_opengl_game_classic" = yes || test "$_opengl_game_shaders" = yes; then
+if test "$_tinygl" = yes || test "$_opengl_game_classic" = yes || test "$_opengl_game_shaders" = yes || test "$_metal" = yes; then
 	_3d=yes
 else
 	_3d=no
@@ -8025,6 +8106,8 @@ SAVED_CXXFILT           := $SAVED_CXXFILT
 SAVED_DWP               := $SAVED_DWP
 SAVED_LD                := $SAVED_LD
 SAVED_LDFLAGS           := $SAVED_LDFLAGS
+SAVED_METAL_SHADER_CFLAGS := $SAVED_METAL_SHADER_CFLAGS
+SAVED_METAL_SHADER_LIBS := $SAVED_METAL_SHADER_LIBS
 SAVED_NM                := $SAVED_NM
 SAVED_PKG_CONFIG_LIBDIR := $SAVED_PKG_CONFIG_LIBDIR
 SAVED_RANLIB            := $SAVED_RANLIB

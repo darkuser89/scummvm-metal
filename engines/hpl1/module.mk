@@ -386,6 +386,13 @@ MODULE_OBJS += \
 	engine/impl/vertex_buffer_tgl.o
 endif
 
+ifdef USE_METAL
+MODULE_OBJS += \
+	engine/impl/low_level_graphics_metal.o \
+	engine/impl/metal_resources.o \
+	engine/impl/metal_vertex_buffer.o
+endif
+
 # This module can be built as a plugin
 ifeq ($(ENABLE_HPL1), DYNAMIC_PLUGIN)
 PLUGIN := 1

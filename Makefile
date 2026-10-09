@@ -97,7 +97,7 @@ include $(srcdir)/Makefile.common
 ENGINE_SUBDIRS_CONFIGURE := $(wildcard $(srcdir)/engines/*/configure.engine)
 
 config.h:
-SAVED_ENV_VARS = AR AS ASFLAGS CPPFLAGS CXX CXXFILT CXXFLAGS LD LDFLAGS NM RANLIB SDL_CONFIG STRIP WINDRES WINDRESFLAGS
+SAVED_ENV_VARS = AR AS ASFLAGS CPPFLAGS CXX CXXFILT CXXFLAGS LD LDFLAGS NM RANLIB SDL_CONFIG STRIP WINDRES WINDRESFLAGS METAL_SHADER_CFLAGS METAL_SHADER_LIBS
 
 # The environment variable PKG_CONFIG_LIBDIR has a different meaning
 # for pkg-config when it is empty and when it is not defined.

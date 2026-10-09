@@ -263,6 +263,9 @@ GfxBase *GrimEngine::createRenderer(int screenW, int screenH) {
 	uint32 availableRendererTypes = Graphics::Renderer::getAvailableTypes();
 
 	availableRendererTypes &=
+#if defined(USE_METAL)
+			Graphics::kRendererTypeMetal |
+#endif
 #if defined(USE_OPENGL_GAME)
 			Graphics::kRendererTypeOpenGL |
 #endif
@@ -296,12 +299,19 @@ GfxBase *GrimEngine::createRenderer(int screenW, int screenH) {
 
 	_softRenderer = matchingRendererType == Graphics::kRendererTypeTinyGL;
 	if (!_softRenderer) {
-		initGraphics3d(screenW, screenH);
+		initGraphics3d(screenW, screenH, matchingRendererType == Graphics::kRendererTypeMetal);
 	} else {
 		initGraphics(screenW, screenH, nullptr);
 	}
 
 	GfxBase *renderer = nullptr;
+#if defined(USE_METAL)
+	if (matchingRendererType == Graphics::kRendererTypeMetal) {
+		renderer = CreateGfxMetal();
+		screenW = g_system->getWidth();
+		screenH = g_system->getHeight();
+	}
+#endif
 #if defined(USE_OPENGL_SHADERS)
 	if (matchingRendererType == Graphics::kRendererTypeOpenGLShaders) {
 		renderer = CreateGfxOpenGLShader();

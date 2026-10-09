@@ -513,43 +513,38 @@ bool RA2PSXModel::parseObject(const Common::Array<byte> &data, uint32 objectOffs
 	return true;
 }
 
-#ifdef USE_TINYGL
+#if defined(USE_METAL) || defined(USE_TINYGL)
 
-RA2PSXTinyGLRenderer::RA2PSXTinyGLRenderer() : _context(nullptr), _activeTexture(nullptr),
+RA2PSXRenderer::RA2PSXRenderer() : _activeTexture(nullptr),
 		_textureEnabled(false), _blendEnabled(false), _width(0), _height(0),
 		_viewOffsetX(0), _viewOffsetY(0) {
 }
 
-RA2PSXTinyGLRenderer::~RA2PSXTinyGLRenderer() {
-	if (_context)
-		TinyGL::destroyContext(_context);
+RA2PSXRenderer::~RA2PSXRenderer() {
 }
 
-bool RA2PSXTinyGLRenderer::init(int width, int height) {
-	if (_context)
-		return _width == width && _height == height;
-	_context = TinyGL::createContext(width, height, g_system->getScreenFormat(), 256, false, false);
-	if (!_context)
+bool RA2PSXRenderer::init(int width, int height) {
+	if (!_raster.init(width, height, g_system->getScreenFormat()))
 		return false;
 	_width = width;
 	_height = height;
-	TinyGL::setContext(_context);
-	tglViewport(0, 0, width, height);
-	tglClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-	tglEnable(TGL_DEPTH_TEST);
-	tglDepthFunc(TGL_LESS);
-	tglDisable(TGL_LIGHTING);
-	tglDisable(TGL_TEXTURE_2D);
-	tglDisable(TGL_ALPHA_TEST);
-	tglDisable(TGL_BLEND);
-	tglDisable(TGL_CULL_FACE);
-	tglAlphaFunc(TGL_GREATER, 0.0f);
-	tglBlendFunc(TGL_SRC_ALPHA, TGL_ONE_MINUS_SRC_ALPHA);
-	tglTexEnvi(TGL_TEXTURE_ENV, TGL_TEXTURE_ENV_MODE, TGL_MODULATE);
+	_raster.makeCurrent();
+	_raster.viewport(0, 0, width, height);
+	_raster.clearColor(0.0f, 0.0f, 0.0f, 1.0f);
+	_raster.enable(TGL_DEPTH_TEST);
+	_raster.depthFunc(TGL_LESS);
+	_raster.disable(TGL_LIGHTING);
+	_raster.disable(TGL_TEXTURE_2D);
+	_raster.disable(TGL_ALPHA_TEST);
+	_raster.disable(TGL_BLEND);
+	_raster.disable(TGL_CULL_FACE);
+	_raster.alphaFunc(TGL_GREATER, 0.0f);
+	_raster.blendFunc(TGL_SRC_ALPHA, TGL_ONE_MINUS_SRC_ALPHA);
+	_raster.texEnvi(TGL_TEXTURE_ENV, TGL_TEXTURE_ENV_MODE, TGL_MODULATE);
 	return true;
 }
 
-TGLuint RA2PSXTinyGLRenderer::getTextureId(const RA2PSXTexture &texture) {
+TGLuint RA2PSXRenderer::getTextureId(const RA2PSXTexture &texture) {
 	for (uint i = 0; i < _textureBindings.size(); ++i) {
 		if (_textureBindings[i].texture == &texture)
 			return _textureBindings[i].id;
@@ -568,42 +563,42 @@ TGLuint RA2PSXTinyGLRenderer::getTextureId(const RA2PSXTexture &texture) {
 
 	TextureBinding binding;
 	binding.texture = &texture;
-	tglGenTextures(1, &binding.id);
-	tglBindTexture(TGL_TEXTURE_2D, binding.id);
-	tglTexParameteri(TGL_TEXTURE_2D, TGL_TEXTURE_MIN_FILTER, TGL_NEAREST);
-	tglTexParameteri(TGL_TEXTURE_2D, TGL_TEXTURE_MAG_FILTER, TGL_NEAREST);
-	tglTexParameteri(TGL_TEXTURE_2D, TGL_TEXTURE_WRAP_S, TGL_CLAMP_TO_EDGE);
-	tglTexParameteri(TGL_TEXTURE_2D, TGL_TEXTURE_WRAP_T, TGL_CLAMP_TO_EDGE);
-	tglTexImage2D(TGL_TEXTURE_2D, 0, TGL_RGBA, texture.width, texture.height, 0,
+	_raster.genTextures(1, &binding.id);
+	_raster.bindTexture(TGL_TEXTURE_2D, binding.id);
+	_raster.texParameteri(TGL_TEXTURE_2D, TGL_TEXTURE_MIN_FILTER, TGL_NEAREST);
+	_raster.texParameteri(TGL_TEXTURE_2D, TGL_TEXTURE_MAG_FILTER, TGL_NEAREST);
+	_raster.texParameteri(TGL_TEXTURE_2D, TGL_TEXTURE_WRAP_S, TGL_CLAMP_TO_EDGE);
+	_raster.texParameteri(TGL_TEXTURE_2D, TGL_TEXTURE_WRAP_T, TGL_CLAMP_TO_EDGE);
+	_raster.texImage2D(TGL_TEXTURE_2D, 0, TGL_RGBA, texture.width, texture.height, 0,
 			TGL_RGBA, TGL_UNSIGNED_BYTE, rgba.data());
 	_textureBindings.push_back(binding);
 	return binding.id;
 }
 
-void RA2PSXTinyGLRenderer::setFaceState(const RA2PSXModel &model, const RA2PSXFace &face) {
+void RA2PSXRenderer::setFaceState(const RA2PSXModel &model, const RA2PSXFace &face) {
 	const RA2PSXTexture *texture = model.texture(face.texture);
 	if (texture) {
 		if (!_textureEnabled) {
-			tglEnable(TGL_TEXTURE_2D);
-			tglEnable(TGL_ALPHA_TEST);
+			_raster.enable(TGL_TEXTURE_2D);
+			_raster.enable(TGL_ALPHA_TEST);
 			_textureEnabled = true;
 		}
 		if (_activeTexture != texture) {
-			tglBindTexture(TGL_TEXTURE_2D, getTextureId(*texture));
+			_raster.bindTexture(TGL_TEXTURE_2D, getTextureId(*texture));
 			_activeTexture = texture;
 		}
 	} else if (_textureEnabled) {
-		tglDisable(TGL_TEXTURE_2D);
-		tglDisable(TGL_ALPHA_TEST);
+		_raster.disable(TGL_TEXTURE_2D);
+		_raster.disable(TGL_ALPHA_TEST);
 		_textureEnabled = false;
 	}
 
 	const bool blend = (face.mode & 8) != 0;
 	if (blend != _blendEnabled) {
 		if (blend)
-			tglEnable(TGL_BLEND);
+			_raster.enable(TGL_BLEND);
 		else
-			tglDisable(TGL_BLEND);
+			_raster.disable(TGL_BLEND);
 		_blendEnabled = blend;
 	}
 }
@@ -615,7 +610,7 @@ int getRA2PSXDepthCue(float depth, float focalLength) {
 	return CLIP<int>((0x04440000LL - 28416LL * quotient) >> 12, 0, 4096);
 }
 
-void RA2PSXTinyGLRenderer::setFaceColor(const RA2PSXFace &face, uint vertexIndex,
+void RA2PSXRenderer::setFaceColor(const RA2PSXFace &face, uint vertexIndex,
 		float normalX, float normalY, float normalZ, float depth) {
 	int r = face.r[vertexIndex];
 	int g = face.g[vertexIndex];
@@ -659,24 +654,24 @@ void RA2PSXTinyGLRenderer::setFaceColor(const RA2PSXFace &face, uint vertexIndex
 		g = MIN(g * 2, 0xff);
 		b = MIN(b * 2, 0xff);
 	}
-	tglColor4ub(r, g, b, (face.texture < 0 && (face.mode & 8)) ? 0x80 : 0xff);
+	_raster.color4ub(r, g, b, (face.texture < 0 && (face.mode & 8)) ? 0x80 : 0xff);
 }
 
-void RA2PSXTinyGLRenderer::beginFrame(const Graphics::Surface &background) {
+void RA2PSXRenderer::beginFrame(const Graphics::Surface &background) {
 	RA2PSXBackgroundView view;
 	view.panX = (background.w - MIN<int>(background.w, _width)) / 2;
 	view.panY = (background.h - MIN<int>(background.h, _height)) / 2;
 	beginFrame(background, view);
 }
 
-void RA2PSXTinyGLRenderer::beginFrame(const Graphics::Surface &background,
+void RA2PSXRenderer::beginFrame(const Graphics::Surface &background,
 		const RA2PSXBackgroundView &view) {
-	if (!_context)
+	if (!_raster.initialized())
 		return;
-	TinyGL::setContext(_context);
+	_raster.makeCurrent();
 
 	Graphics::Surface surface;
-	TinyGL::getSurfaceRef(surface);
+	_raster.getSurfaceRef(surface);
 	surface.fillRect(Common::Rect(surface.w, surface.h), 0);
 	const int width = MIN<int>(background.w, surface.w);
 	const int height = MIN<int>(background.h, surface.h);
@@ -702,20 +697,21 @@ void RA2PSXTinyGLRenderer::beginFrame(const Graphics::Surface &background,
 		}
 		column = end;
 	}
-	tglClear(TGL_DEPTH_BUFFER_BIT);
+	_raster.copyBackground(surface);
+	_raster.clear(TGL_DEPTH_BUFFER_BIT);
 
-	tglMatrixMode(TGL_PROJECTION);
-	tglLoadIdentity();
-	tglOrthof(0.0f, (float)_width, (float)_height, 0.0f, -1024.0f, 1024.0f);
-	tglMatrixMode(TGL_MODELVIEW);
-	tglLoadIdentity();
+	_raster.matrixMode(TGL_PROJECTION);
+	_raster.loadIdentity();
+	_raster.orthof(0.0f, (float)_width, (float)_height, 0.0f, -1024.0f, 1024.0f);
+	_raster.matrixMode(TGL_MODELVIEW);
+	_raster.loadIdentity();
 }
 
-void RA2PSXTinyGLRenderer::renderSprite(const RA2PSXTexture &texture, float x, float y, float z,
+void RA2PSXRenderer::renderSprite(const RA2PSXTexture &texture, float x, float y, float z,
 		float halfWidth, float halfHeight, int rotation, int brightness) {
-	if (!_context || z <= 1.0f || texture.pixels.empty())
+	if (!_raster.initialized() || z <= 1.0f || texture.pixels.empty())
 		return;
-	TinyGL::setContext(_context);
+	_raster.makeCurrent();
 
 	const float focalLength = _width * 2.0f;
 	const float centerX = _width * 0.5f + _viewOffsetX + x * focalLength / z;
@@ -730,37 +726,37 @@ void RA2PSXTinyGLRenderer::renderSprite(const RA2PSXTexture &texture, float x, f
 	const float u[4] = { 0.0f, 1.0f, 0.0f, 1.0f };
 	const float v[4] = { 0.0f, 0.0f, 1.0f, 1.0f };
 
-	tglDisable(TGL_DEPTH_TEST);
-	tglEnable(TGL_TEXTURE_2D);
-	tglEnable(TGL_ALPHA_TEST);
-	tglEnable(TGL_BLEND);
-	tglBindTexture(TGL_TEXTURE_2D, getTextureId(texture));
+	_raster.disable(TGL_DEPTH_TEST);
+	_raster.enable(TGL_TEXTURE_2D);
+	_raster.enable(TGL_ALPHA_TEST);
+	_raster.enable(TGL_BLEND);
+	_raster.bindTexture(TGL_TEXTURE_2D, getTextureId(texture));
 	// Textured primitives treat 0x80 as neutral, so the tint doubles.
 	const byte tint = (byte)MIN(brightness * 2, 0xff);
-	tglColor4ub(tint, tint, tint, 0xff);
-	tglBegin(TGL_QUAD_STRIP);
+	_raster.color4ub(tint, tint, tint, 0xff);
+	_raster.begin(TGL_QUAD_STRIP);
 	for (uint corner = 0; corner < 4; ++corner) {
-		tglTexCoord2f(u[corner], v[corner]);
-		tglVertex3f(centerX + cornerX[corner] * cosine - cornerY[corner] * sine,
+		_raster.texCoord2f(u[corner], v[corner]);
+		_raster.vertex3f(centerX + cornerX[corner] * cosine - cornerY[corner] * sine,
 				centerY + cornerX[corner] * sine + cornerY[corner] * cosine, 0.0f);
 	}
-	tglEnd();
-	tglDisable(TGL_BLEND);
-	tglDisable(TGL_ALPHA_TEST);
-	tglDisable(TGL_TEXTURE_2D);
-	tglEnable(TGL_DEPTH_TEST);
+	_raster.end();
+	_raster.disable(TGL_BLEND);
+	_raster.disable(TGL_ALPHA_TEST);
+	_raster.disable(TGL_TEXTURE_2D);
+	_raster.enable(TGL_DEPTH_TEST);
 	_activeTexture = nullptr;
 	_textureEnabled = false;
 	_blendEnabled = false;
 }
 
-void RA2PSXTinyGLRenderer::renderModel(const RA2PSXModel &model, float x, float y, float size,
+void RA2PSXRenderer::renderModel(const RA2PSXModel &model, float x, float y, float size,
 		float pitch, float yaw, float roll, bool depthTest) {
-	if (!_context || model.vertices().empty())
+	if (!_raster.initialized() || model.vertices().empty())
 		return;
-	TinyGL::setContext(_context);
+	_raster.makeCurrent();
 	if (!depthTest)
-		tglDisable(TGL_DEPTH_TEST);
+		_raster.disable(TGL_DEPTH_TEST);
 	const float scale = size / model.radius();
 	const float pitchAngle = pitch * 0.017453292519943295f;
 	const float yawAngle = yaw * 0.017453292519943295f;
@@ -802,7 +798,7 @@ void RA2PSXTinyGLRenderer::renderModel(const RA2PSXModel &model, float x, float 
 		for (uint vertexIndex = 0; vertexIndex < face.vertexCount; ++vertexIndex)
 			faceDepth += facingVertices[face.vertex[vertexIndex]].z;
 		faceDepth = faceDepth * scale / face.vertexCount;
-		tglBegin(face.vertexCount == 4 ? TGL_QUAD_STRIP : TGL_TRIANGLES);
+		_raster.begin(face.vertexCount == 4 ? TGL_QUAD_STRIP : TGL_TRIANGLES);
 		for (uint vertexIndex = 0; vertexIndex < face.vertexCount; ++vertexIndex) {
 			const float normalX = face.normalX[vertexIndex];
 			const float normalY = -face.normalY[vertexIndex];
@@ -815,21 +811,21 @@ void RA2PSXTinyGLRenderer::renderModel(const RA2PSXModel &model, float x, float 
 					rollCosine * yawX - rollSine * pitchY,
 					rollSine * yawX + rollCosine * pitchY, pitchZ, depth);
 			if (texture)
-				tglTexCoord2f((face.u[vertexIndex] + 0.5f) / texture->width,
+				_raster.texCoord2f((face.u[vertexIndex] + 0.5f) / texture->width,
 						(face.v[vertexIndex] + 0.5f) / texture->height);
 			const FacingVertex &vertex = facingVertices[face.vertex[vertexIndex]];
-			tglVertex3f(x + vertex.x * scale, y + vertex.y * scale, faceDepth);
+			_raster.vertex3f(x + vertex.x * scale, y + vertex.y * scale, faceDepth);
 		}
-		tglEnd();
+		_raster.end();
 	}
 	if (!depthTest)
-		tglEnable(TGL_DEPTH_TEST);
+		_raster.enable(TGL_DEPTH_TEST);
 }
 
-void RA2PSXTinyGLRenderer::renderPerspectiveModel(const RA2PSXModel &model,
+void RA2PSXRenderer::renderPerspectiveModel(const RA2PSXModel &model,
 		float x, float y, float z, float directionX, float directionY, float directionZ,
 		float roll, bool depthTest, int scale) {
-	if (!_context || model.vertices().empty())
+	if (!_raster.initialized() || model.vertices().empty())
 		return;
 
 	const float directionLength = sqrtf(directionX * directionX + directionY * directionY +
@@ -887,9 +883,9 @@ void RA2PSXTinyGLRenderer::renderPerspectiveModel(const RA2PSXModel &model,
 	renderTransformedModel(model, transform, depthTest);
 }
 
-void RA2PSXTinyGLRenderer::renderTransformedModel(const RA2PSXModel &model,
+void RA2PSXRenderer::renderTransformedModel(const RA2PSXModel &model,
 		const RA2PSXMatrix &transform, bool depthTest) {
-	if (!_context || model.vertices().empty())
+	if (!_raster.initialized() || model.vertices().empty())
 		return;
 
 	struct ProjectedVertex {
@@ -944,9 +940,9 @@ void RA2PSXTinyGLRenderer::renderTransformedModel(const RA2PSXModel &model,
 	}
 	Common::sort(projectedFaces.begin(), projectedFaces.end());
 
-	TinyGL::setContext(_context);
+	_raster.makeCurrent();
 	if (!depthTest)
-		tglDisable(TGL_DEPTH_TEST);
+		_raster.disable(TGL_DEPTH_TEST);
 	for (uint faceIndex = 0; faceIndex < projectedFaces.size(); ++faceIndex) {
 		const ProjectedFace &projectedFace = projectedFaces[faceIndex];
 		const RA2PSXFace &face = faces[projectedFace.index];
@@ -956,7 +952,7 @@ void RA2PSXTinyGLRenderer::renderTransformedModel(const RA2PSXModel &model,
 		const RA2PSXTexture *texture = model.texture(face.texture);
 		setFaceState(model, face);
 		const float faceDepth = projected[face.vertex[2]].z;
-		tglBegin(face.vertexCount == 4 ? TGL_QUAD_STRIP : TGL_TRIANGLES);
+		_raster.begin(face.vertexCount == 4 ? TGL_QUAD_STRIP : TGL_TRIANGLES);
 		for (uint vertexIndex = 0; vertexIndex < face.vertexCount; ++vertexIndex) {
 			setFaceColor(face, vertexIndex,
 					transform.rotation[0][0] * face.normalX[vertexIndex] +
@@ -969,23 +965,23 @@ void RA2PSXTinyGLRenderer::renderTransformedModel(const RA2PSXModel &model,
 							transform.rotation[2][1] * face.normalY[vertexIndex] +
 							transform.rotation[2][2] * face.normalZ[vertexIndex], faceDepth);
 			if (texture)
-				tglTexCoord2f((face.u[vertexIndex] + 0.5f) / texture->width,
+				_raster.texCoord2f((face.u[vertexIndex] + 0.5f) / texture->width,
 						(face.v[vertexIndex] + 0.5f) / texture->height);
 			const ProjectedVertex &vertex = projected[face.vertex[vertexIndex]];
-			tglVertex3f(vertex.x, vertex.y, orderingDepth);
+			_raster.vertex3f(vertex.x, vertex.y, orderingDepth);
 		}
-		tglEnd();
+		_raster.end();
 	}
 	if (!depthTest)
-		tglEnable(TGL_DEPTH_TEST);
+		_raster.enable(TGL_DEPTH_TEST);
 }
 
-void RA2PSXTinyGLRenderer::finishFrame(Graphics::Surface &surface) {
-	if (!_context)
+void RA2PSXRenderer::finishFrame(Graphics::Surface &surface) {
+	if (!_raster.initialized())
 		return;
-	TinyGL::setContext(_context);
-	TinyGL::presentBuffer();
-	TinyGL::getSurfaceRef(surface);
+	_raster.makeCurrent();
+	_raster.presentBuffer();
+	_raster.getSurfaceRef(surface);
 }
 
 #endif

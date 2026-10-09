@@ -21,9 +21,14 @@
 
 #include "common/scummsys.h"
 
-#if defined(USE_OPENGL_GAME)
+#if defined(USE_OPENGL_GAME) || defined(USE_METAL)
 
+#ifdef USE_OPENGL_GAME
 #include "graphics/opengl/system_headers.h"
+#endif
+#ifdef USE_METAL
+#include "watchmaker/3d/render/metal.h"
+#endif
 
 #include "common/system.h"
 #include "math/glmath.h"
@@ -37,6 +42,7 @@
 #include "watchmaker/render.h"
 #include "watchmaker/renderer.h"
 #include "watchmaker/windows_hacks.h"
+#include "watchmaker/3d/render/opengl_renderer.h"
 
 namespace Watchmaker {
 
@@ -44,11 +50,40 @@ Renderer::Renderer(WGame *game, sdl_wrapper *wrapper) : _2dStuff(this), sdl(wrap
 	_workDirs = &game->workDirs;
 }
 
+Renderer::~Renderer() {
+#ifdef USE_METAL
+	if (usingMetal()) {
+		Common::Array<Texture *> released;
+		auto release = [&](gTexture &texture) {
+			Texture *resource = texture._texture;
+			if (!resource) return;
+			bool seen = false;
+			for (Texture *existing : released) if (existing == resource) seen = true;
+			if (!seen) { released.push_back(resource); delete resource; }
+			texture._texture = nullptr;
+		};
+		for (gTexture &bitmap : _bitmapList.bitmaps) release(bitmap);
+		for (uint i = 0; i < gNumTextureList; ++i) release(gTextureList[i]);
+		gNumTextureList = 0;
+		delete g_renderer;
+		g_renderer = nullptr;
+	}
+#endif
+}
+
 // blitter info
 Common::Rect    gBlitterViewport;
 gTexture        gScreenBuffer;
 
 void Renderer::initGL() {
+#ifdef USE_METAL
+	if (usingMetal()) {
+		if (!g_renderer) g_renderer = new OpenGLRenderer();
+		auto info = getScreenInfos();
+		g_renderer->initMetal((float)info.width / info.height); return;
+	}
+#endif
+#ifdef USE_OPENGL_GAME
 	auto windowInfo = this->getScreenInfos();
 	// Cut'n paste from https://www.libsdl.org/release/SDL-1.2.15/docs/html/guidevideoopengl.html
 	float ratio = (float)windowInfo.width / windowInfo.height;
@@ -71,6 +106,10 @@ void Renderer::initGL() {
 
 	auto perspectiveMatrix = Math::makePerspectiveMatrix(60.0, ratio, 1.0, 1024.0);
 	glLoadMatrixf(perspectiveMatrix.getData());
+
+#else
+
+#endif
 }
 
 void Renderer::setVirtualScreen(unsigned int dimX, unsigned int dimY) {
@@ -201,6 +240,14 @@ void Renderer::printText(const char *s, unsigned int dst, FontKind font, FontCol
 }
 
 bool Renderer::setProjectionMatrix(float width, float height, float fAspect, float fNearPlane, float fFarPlane) {
+#ifdef USE_METAL
+	if (usingMetal()) {
+		_nearPlane = fNearPlane;
+		_projectionMatrix = Math::makePerspectiveMatrix(fAspect, width / height, fNearPlane, fFarPlane);
+		g_renderer->setMetalProjection(_projectionMatrix.getData()); return true;
+	}
+#endif
+#ifdef USE_OPENGL_GAME
 	// Not sure if fAspect is Y here though
 	glMatrixMode(GL_PROJECTION);
 	_nearPlane = fNearPlane;
@@ -209,6 +256,10 @@ bool Renderer::setProjectionMatrix(float width, float height, float fAspect, flo
 
 	glMatrixMode(GL_MODELVIEW);
 	return false;
+
+#else
+	return false;
+#endif
 }
 
 Math::Vector3d vector3Matrix4Mult(Math::Vector3d &vec, const Math::Matrix4 &m) {

@@ -148,6 +148,12 @@ MODULE_OBJS += \
 	gfx_tinygl.o
 endif
 
+ifdef USE_METAL
+MODULE_OBJS += \
+	gfx_metal.o \
+	metal_draw.o
+endif
+
 # This module can be built as a plugin
 ifeq ($(ENABLE_GRIM), DYNAMIC_PLUGIN)
 PLUGIN := 1

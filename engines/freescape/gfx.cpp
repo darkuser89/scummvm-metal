@@ -1359,6 +1359,9 @@ Graphics::RendererType determinateRenderType() {
 	Common::String rendererConfig = ConfMan.get("renderer");
 	Graphics::RendererType desiredRendererType = Graphics::Renderer::parseTypeCode(rendererConfig);
 	Graphics::RendererType matchingRendererType = Graphics::Renderer::getBestMatchingAvailableType(desiredRendererType,
+#ifdef USE_METAL
+	    Graphics::kRendererTypeMetal |
+#endif
 #if defined(USE_OPENGL_GAME)
 	    Graphics::kRendererTypeOpenGL |
 #endif
@@ -1375,6 +1378,10 @@ Graphics::RendererType determinateRenderType() {
 		warning("Unable to create a '%s' renderer", rendererConfig.c_str());
 	}
 
+#ifdef USE_METAL
+	if (matchingRendererType == Graphics::kRendererTypeMetal)
+		return matchingRendererType;
+#endif
 	#if defined(USE_OPENGL_GAME) && !defined(USE_GLES2)
 	if (matchingRendererType == Graphics::kRendererTypeOpenGL)
 		return matchingRendererType;
@@ -1398,11 +1405,15 @@ Renderer *createRenderer(int screenW, int screenH, Common::RenderMode renderMode
 	bool isAccelerated = rendererType != Graphics::kRendererTypeTinyGL;
 
 	if (isAccelerated) {
-		initGraphics3d(screenW, screenH);
+		initGraphics3d(screenW, screenH, rendererType == Graphics::kRendererTypeMetal);
 	} else {
 		initGraphics(screenW, screenH, nullptr);
 	}
 
+	#ifdef USE_METAL
+	if (rendererType == Graphics::kRendererTypeMetal)
+		return CreateGfxMetal(screenW, screenH, renderMode, authenticGraphics);
+	#endif
 	#if defined(USE_OPENGL_GAME) && !defined(USE_GLES2)
 	if (rendererType == Graphics::kRendererTypeOpenGL) {
 		return CreateGfxOpenGL(screenW, screenH, renderMode, authenticGraphics);

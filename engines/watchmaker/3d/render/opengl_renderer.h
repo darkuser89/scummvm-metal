@@ -27,6 +27,9 @@
 #include "watchmaker/utils.h"
 #include "watchmaker/render.h"
 #include "watchmaker/3d/render/opengl_3d.h"
+#ifdef USE_METAL
+#include "graphics/metal/renderer.h"
+#endif
 
 namespace Watchmaker {
 
@@ -72,6 +75,22 @@ Texture *createGLTexture();
 
 class OpenGLRenderer {
 public:
+#ifdef USE_METAL
+	void initMetal(float ratio);
+	void setMetalProjection(const float *matrix);
+	void bindMetalTexture(Graphics::Metal::Texture *texture) { _metalTexture = texture; }
+	void releaseMetalTexture(Graphics::Metal::Texture *texture) { if (_metalTexture == texture) _metalTexture = nullptr; }
+	void drawMetalBatch(PrimitiveType primitive, const VertexBuffer &vertices, const uint16 *faces, uint count);
+	void drawMetalVertices(PrimitiveType primitive, Vertex *vertices, int count);
+	void pushMetalModelView();
+	void popMetalModelView();
+	void setMetalTransform(TransformMatrix which, const Matrix4x4 &matrix);
+	void setMetalState(RenderState state, int value);
+	void setMetalBlend(BlendFactor src, BlendFactor dst);
+	void setMetalWrap(TextureWrapMode mode);
+	void enterMetal2D();
+	void exitMetal2D();
+#endif
 	void enter2Dmode();
 	void exit2Dmode();
 
@@ -101,6 +120,14 @@ public:
 	bool supportsMultiTexturing() const { // TODO
 		return false;
 	}
+
+private:
+#ifdef USE_METAL
+	Matrix4x4 _metalModelView, _metalProjection;
+	Common::Array<Matrix4x4> _metalModelStack, _metalProjectionStack;
+	Graphics::Metal::DrawState _metalState;
+	Graphics::Metal::Texture *_metalTexture = nullptr;
+#endif
 };
 
 extern OpenGLRenderer *g_renderer;

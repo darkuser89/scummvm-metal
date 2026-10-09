@@ -196,11 +196,9 @@ static Common::Error runGame(const Plugin *enginePlugin, OSystem &system, const 
 	Common::Error err = Common::kNoError;
 	Engine *engine = nullptr;
 
-#if defined(SDL_BACKEND) && defined(USE_OPENGL) && defined(USE_RGB_COLOR)
-	// HACK: We set up the requested graphics mode setting here to allow the
-	// backend to switch from Surface SDL to OpenGL if necessary. This is
-	// needed because otherwise the g_system->getSupportedFormats might return
-	// bad values.
+#if defined(SDL_BACKEND) && (defined(USE_OPENGL) || defined(USE_METAL)) && defined(USE_RGB_COLOR)
+	// Select the game's graphics mode before the engine queries pixel formats.
+	// This also applies per-game MetalFX settings when starting from the launcher.
 	g_system->beginGFXTransaction();
 		g_system->setGraphicsMode(ConfMan.get("gfx_mode").c_str());
 	if (g_system->endGFXTransaction() != OSystem::kTransactionSuccess) {

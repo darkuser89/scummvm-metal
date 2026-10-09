@@ -85,6 +85,10 @@ MODULE_OBJS = \
 
 
 
+ifdef USE_METAL
+MODULE_OBJS += 3d/render/metal.o
+endif
+
 # This module can be built as a plugin
 ifeq ($(ENABLE_WATCHMAKER), DYNAMIC_PLUGIN)
 PLUGIN := 1

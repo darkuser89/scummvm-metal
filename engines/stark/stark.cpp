@@ -342,6 +342,9 @@ bool StarkEngine::hasFeature(EngineFeature f) const {
 	Common::String rendererConfig = ConfMan.get("renderer");
 	Graphics::RendererType desiredRendererType = Graphics::Renderer::parseTypeCode(rendererConfig);
 	Graphics::RendererType matchingRendererType = Graphics::Renderer::getBestMatchingAvailableType(desiredRendererType,
+#ifdef USE_METAL
+			Graphics::kRendererTypeMetal |
+#endif
 #if defined(USE_OPENGL_GAME)
 			Graphics::kRendererTypeOpenGL |
 #endif

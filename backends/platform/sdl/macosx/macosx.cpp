@@ -29,6 +29,9 @@
 #include "backends/audiocd/macosx/macosx-audiocd.h"
 #include "backends/platform/sdl/macosx/appmenu_osx.h"
 #include "backends/platform/sdl/macosx/macosx.h"
+#ifdef USE_METAL
+#include "graphics/metal/renderer.h"
+#endif
 #include "backends/platform/sdl/macosx/macosx-touchbar.h"
 #include "backends/platform/sdl/macosx/macosx-window.h"
 #include "backends/updates/macosx/macosx-updates.h"
@@ -143,9 +146,17 @@ void OSystem_MacOSX::initBackend() {
 	OSystem_POSIX::initBackend();
 }
 
-#ifdef USE_OPENGL
+#if defined(USE_OPENGL) || defined(USE_METAL)
 OSystem_SDL::GraphicsManagerType OSystem_MacOSX::getDefaultGraphicsManager() const {
+#ifdef USE_METAL
+	if (Graphics::Metal::Renderer::isSupported())
+		return GraphicsManagerMetal;
+#endif
+#ifdef USE_OPENGL
 	return GraphicsManagerOpenGL;
+#else
+	return GraphicsManagerSurfaceSDL;
+#endif
 }
 #endif
 

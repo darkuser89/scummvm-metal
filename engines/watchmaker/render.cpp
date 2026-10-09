@@ -25,13 +25,19 @@
 #include "watchmaker/ll/ll_system.h"
 #include "watchmaker/tga_util.h"
 #include "common/stream.h"
+#include "common/system.h"
 #include "watchmaker/game.h"
 #include "watchmaker/rect.h"
 #include "watchmaker/renderer.h"
 
-#if defined(USE_OPENGL_GAME)
+#if defined(USE_OPENGL_GAME) || defined(USE_METAL)
 
+#ifdef USE_OPENGL_GAME
 #include "graphics/opengl/system_headers.h"
+#endif
+#ifdef USE_METAL
+#include "watchmaker/3d/render/metal.h"
+#endif
 #include "math/glmath.h"
 
 #define MAXTEXTURES     2000
@@ -70,6 +76,10 @@ void rSetRenderMode(int state) {
 }
 
 bool checkGlError(const char *when) {
+#ifdef USE_METAL
+	if (usingMetal()) return true;
+#endif
+#ifdef USE_OPENGL_GAME
 	GLenum error = glGetError();
 	if (error != GL_NO_ERROR) {
 		Common::String explanation = "";
@@ -87,9 +97,19 @@ bool checkGlError(const char *when) {
 		return false;
 	}
 	return true;
+
+#else
+	return true;
+#endif
 }
 
 bool rClearBuffers(char flags) {
+#ifdef USE_METAL
+	if (usingMetal()) {
+		g_system->getMetalRenderer()->clear(0, 1, 0, 1, flags & rCLEARSCREENBUFFER, flags & rCLEARZBUFFER, false); return true;
+	}
+#endif
+#ifdef USE_OPENGL_GAME
 	checkGlError("Entering rClearBuffers");
 	bool clearStencil = rGetStencilBitDepth() != 0;
 	bool clearDepth = flags & rCLEARZBUFFER;
@@ -101,6 +121,10 @@ bool rClearBuffers(char flags) {
 	GLbitfield mask = (clearStencil ? GL_STENCIL_BUFFER_BIT : 0) | (clearDepth ? GL_DEPTH_BUFFER_BIT : 0) | (clearScreen ? GL_COLOR_BUFFER_BIT : 0);
 	glClear(mask);
 	return checkGlError("rClearBuffers");
+
+#else
+	return false;
+#endif
 }
 
 unsigned char *rLockSurfaceDirect(gTexture *t, unsigned int *pitch) {

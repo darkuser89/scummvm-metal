@@ -195,6 +195,16 @@ MODULE_OBJS += \
 	ext/wme_shadowmanager.o \
 	ext/wme_vlink.o
 
+ifdef USE_METAL
+MODULE_OBJS += \
+	base/gfx/metal/base_render_metal3d.o \
+	base/gfx/metal/base_surface_metal3d.o \
+	base/gfx/metal/mesh3ds_metal.o \
+	base/gfx/metal/meshx_metal.o \
+	base/gfx/metal/shadow_volume_metal.o \
+	base/gfx/metal/metal_draw.o
+endif
+
 ifdef USE_TINYGL
 MODULE_OBJS += \
 	base/gfx/tinygl/base_render_tinygl.o \

@@ -23,6 +23,9 @@
 
 #include "backends/platform/sdl/sdl-window.h"
 #include "backends/platform/sdl/sdl.h"
+#ifdef USE_METAL
+#include <SDL_metal.h>
+#endif
 
 #include "common/textconsole.h"
 #include "common/util.h"
@@ -358,8 +361,13 @@ float SdlWindow::getSdlDpiScalingFactor() const {
 	int windowWidth, windowHeight;
 	SDL_GetWindowSize(getSDLWindow(), &windowWidth, &windowHeight);
 	int realWidth, realHeight;
+#ifdef USE_METAL
+	if (SDL_GetWindowFlags(getSDLWindow()) & SDL_WINDOW_METAL)
+		SDL_Metal_GetDrawableSize(getSDLWindow(), &realWidth, &realHeight);
+	else
+#endif
 	SDL_GL_GetDrawableSize(getSDLWindow(), &realWidth, &realHeight);
-	return (float)realWidth / (float)windowWidth;
+	return windowWidth > 0 && realWidth > 0 ? (float)realWidth / (float)windowWidth : 1.f;
 #else
 	return 1.f;
 #endif

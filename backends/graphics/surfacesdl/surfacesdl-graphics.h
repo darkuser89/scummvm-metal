@@ -139,6 +139,7 @@ public:
 #endif
 
 protected:
+	void restoreScalerSourceAfterOverlay();
 #ifdef USE_OSD
 	/** Surface containing the OSD message */
 	SDL_Surface *_osdMessageSurface;
@@ -202,6 +203,7 @@ protected:
 
 	virtual SDL_Surface *SDL_SetVideoMode(int width, int height, int bpp, Uint32 flags);
 	virtual void SDL_UpdateRects(SDL_Surface *screen, int numrects, SDL_Rect *rects);
+	virtual void presentScreen();
 	int SDL_SetColors(SDL_Surface *surface, SDL_Color *colors, int firstcolor, int ncolors);
 #endif
 
@@ -425,6 +427,8 @@ protected:
 	virtual void updateScreen(SDL_Rect *dirtyRectList, int actualDirtyRects);
 
 	virtual bool loadGFXMode();
+	virtual SDL_Surface *createOffscreenSurface(int width, int height);
+	virtual bool needsDisplayUpdate() const { return !_displayDisabled; }
 	virtual void unloadGFXMode();
 	virtual bool hotswapGFXMode();
 

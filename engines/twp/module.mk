@@ -60,6 +60,10 @@ MODULE_OBJS = \
 	squirrel/sqstdrex.o \
 	squirrel/sqstdaux.o \
 
+ifdef USE_METAL
+MODULE_OBJS += gfx-metal.o
+endif
+
 ifdef USE_IMGUI
 MODULE_OBJS += \
 	debugtools.o \

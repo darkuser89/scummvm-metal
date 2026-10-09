@@ -451,6 +451,7 @@ void XcodeProvider::setupFrameworksBuildPhase(const BuildSetup &setup) {
 	DEF_SYSFRAMEWORK("OpenGL");
 	DEF_SYSFRAMEWORK("OpenGLES");
 	DEF_SYSFRAMEWORK("QuartzCore");
+	DEF_SYSFRAMEWORK("Metal");
 	DEF_SYSFRAMEWORK("UIKit");
 	DEF_SYSFRAMEWORK("Security");
 	DEF_SYSFRAMEWORK("SystemConfiguration");
@@ -604,11 +605,14 @@ void XcodeProvider::setupFrameworksBuildPhase(const BuildSetup &setup) {
 		frameworks_osx.push_back("CoreMIDI.framework");
 		frameworks_osx.push_back("CoreAudio.framework");
 		frameworks_osx.push_back("QuartzCore.framework");
+		if (CONTAINS_DEFINE(setup.defines, "USE_METAL"))
+			frameworks_osx.push_back("Metal.framework");
 		frameworks_osx.push_back("Carbon.framework");
 		frameworks_osx.push_back("ApplicationServices.framework");
 		frameworks_osx.push_back("IOKit.framework");
 		frameworks_osx.push_back("Cocoa.framework");
-		frameworks_osx.push_back("OpenGL.framework");
+		if (CONTAINS_DEFINE(setup.defines, "USE_OPENGL"))
+			frameworks_osx.push_back("OpenGL.framework");
 		frameworks_osx.push_back("AudioUnit.framework");
 
 		if (CONTAINS_DEFINE(setup.defines, "USE_TTS") &&
@@ -1431,6 +1435,11 @@ void XcodeProvider::setupBuildConfiguration(const BuildSetup &setup) {
 		scummvmOSX_LibPaths.push_back("\"\\\"$(SRCROOT)/lib\\\"\"");
 		ADD_SETTING_LIST(scummvmOSX_Debug, "LIBRARY_SEARCH_PATHS", scummvmOSX_LibPaths, kSettingsNoQuote | kSettingsAsList, 5);
 		ADD_SETTING_QUOTE(scummvmOSX_Debug, "MACOSX_DEPLOYMENT_TARGET", "$(RECOMMENDED_MACOSX_DEPLOYMENT_TARGET)");
+		if (CONTAINS_DEFINE(setup.defines, "USE_METAL")) {
+			ADD_SETTING(scummvmOSX_Debug, "ARCHS", "arm64");
+			ADD_SETTING_QUOTE(scummvmOSX_Debug, "MACOSX_DEPLOYMENT_TARGET", "13.0");
+			ADD_SETTING_QUOTE(scummvmOSX_Debug, "OTHER_LDFLAGS", "$(inherited) -lshaderc_shared -lspirv-cross-c-shared");
+		}
 		ADD_SETTING_QUOTE(scummvmOSX_Debug, "OTHER_CFLAGS", "");
 		ADD_SETTING(scummvmOSX_Debug, "PRODUCT_NAME", PROJECT_NAME);
 

@@ -289,8 +289,16 @@ void Lua_V1::SetHardwareState() {
 	// changing only in config setup (software/hardware rendering)
 	bool accel = getbool(1);
 
-	Graphics::RendererType renderer = accel ? Graphics::kRendererTypeOpenGL : Graphics::kRendererTypeTinyGL;
+	Graphics::RendererType renderer = accel ?
+#ifdef USE_METAL
+		Graphics::kRendererTypeMetal : Graphics::kRendererTypeTinyGL;
+#else
+		Graphics::kRendererTypeOpenGL : Graphics::kRendererTypeTinyGL;
+#endif
 	renderer = Graphics::Renderer::getBestMatchingAvailableType(renderer,
+#ifdef USE_METAL
+			Graphics::kRendererTypeMetal |
+#endif
 #if defined(USE_OPENGL_GAME)
 			Graphics::kRendererTypeOpenGL |
 #endif

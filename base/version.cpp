@@ -233,6 +233,10 @@ const char gScummVMFeatures[] = ""
 	"TinyGL "
 #endif
 
+#ifdef USE_METAL
+	"Metal3 "
+#endif
+
 #ifdef USE_OPENGL
 	"OpenGL "
 #  ifdef USE_OPENGL_SHADERS

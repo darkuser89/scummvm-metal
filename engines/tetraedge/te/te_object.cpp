@@ -39,10 +39,14 @@ void TeObject::deleteLaterStatic(TeObject *obj) {
 /*static*/
 void TeObject::deleteNow() {
 	Common::Array<TeObject *> *pending = pendingDeleteList();
-	for (auto *obj : (*pending)) {
-		delete obj;
+	while (!pending->empty()) {
+		// Destructors may schedule more objects. Drain separate batches so
+		// those additions cannot invalidate the current iteration or be lost.
+		Common::Array<TeObject *> batch;
+		batch.swap(*pending);
+		for (auto *obj : batch)
+			delete obj;
 	}
-	pending->clear();
 }
 
 /*static*/

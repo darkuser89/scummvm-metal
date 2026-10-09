@@ -34,8 +34,8 @@
 
 #include "math/quat.h"
 
-#if defined(USE_TINYGL)
-#include "graphics/tinygl/tinygl.h"
+#if defined(USE_METAL) || defined(USE_TINYGL)
+#include "graphics/surface-rasterizer.h"
 #endif
 
 namespace Tinsel {
@@ -56,9 +56,9 @@ Spriter::Spriter() {
 }
 
 Spriter::~Spriter() {
-#if defined(USE_TINYGL)
+#if defined(USE_METAL) || defined(USE_TINYGL)
 	if (_textureGenerated) {
-		tglDeleteTextures(TEXTURE_COUNT, _texture);
+		_raster.deleteTextures(TEXTURE_COUNT, _texture);
 	}
 #endif
 }
@@ -123,6 +123,10 @@ void Spriter::SetViewport(int ap) {
 }
 
 void Spriter::Init(int width, int height) {
+#if defined(USE_METAL) || defined(USE_TINYGL)
+	if (!_raster.init(width, height, _vm->screen().format))
+		error("Discworld Noir: could not initialize the actor rasterizer");
+#endif
 	_currentMatrix = &_modelMatrix;
 	_meshShadow.resize(50);
 
@@ -389,12 +393,12 @@ void Spriter::LoadVMC(const Common::String& textureName) {
 }
 
 void Spriter::UpdateTextures() {
-#if defined(USE_TINYGL)
+#if defined(USE_METAL) || defined(USE_TINYGL)
 	if (_textureGenerated) {
-		tglDeleteTextures(TEXTURE_COUNT, _texture);
+		_raster.deleteTextures(TEXTURE_COUNT, _texture);
 	}
 
-	tglGenTextures(TEXTURE_COUNT, _texture);
+	_raster.genTextures(TEXTURE_COUNT, _texture);
 	Common::Array<uint8> tex(256*256*3);
 
 	bool hasPalette = _palette.size() > 0;
@@ -412,13 +416,13 @@ void Spriter::UpdateTextures() {
 				tex[(j * 3) + 2] = index;
 			}
 		}
-		tglBindTexture(TGL_TEXTURE_2D, _texture[i]);
-		tglTexImage2D(TGL_TEXTURE_2D, 0, TGL_RGB, 256, 256, 0, TGL_RGB, TGL_UNSIGNED_BYTE, tex.data());
-		tglTexParameteri(TGL_TEXTURE_2D, TGL_TEXTURE_WRAP_S, TGL_REPEAT);
-		tglTexParameteri(TGL_TEXTURE_2D, TGL_TEXTURE_WRAP_T, TGL_REPEAT);
-		tglTexParameteri(TGL_TEXTURE_2D, TGL_TEXTURE_MAG_FILTER, TGL_NEAREST);
-		tglTexParameteri(TGL_TEXTURE_2D, TGL_TEXTURE_MIN_FILTER, TGL_NEAREST);
-		tglBindTexture(TGL_TEXTURE_2D, 0);
+		_raster.bindTexture(TGL_TEXTURE_2D, _texture[i]);
+		_raster.texImage2D(TGL_TEXTURE_2D, 0, TGL_RGB, 256, 256, 0, TGL_RGB, TGL_UNSIGNED_BYTE, tex.data());
+		_raster.texParameteri(TGL_TEXTURE_2D, TGL_TEXTURE_WRAP_S, TGL_REPEAT);
+		_raster.texParameteri(TGL_TEXTURE_2D, TGL_TEXTURE_WRAP_T, TGL_REPEAT);
+		_raster.texParameteri(TGL_TEXTURE_2D, TGL_TEXTURE_MAG_FILTER, TGL_NEAREST);
+		_raster.texParameteri(TGL_TEXTURE_2D, TGL_TEXTURE_MIN_FILTER, TGL_NEAREST);
+		_raster.bindTexture(TGL_TEXTURE_2D, 0);
 	}
 #endif
 	_textureGenerated = true;
@@ -985,9 +989,9 @@ void Spriter::RenderMesh(Mesh& mesh, Vectors& vertices, Vectors &normals) {
 }
 
 void Spriter::RenderMeshPartColor(MeshPart& part, Vectors& vertices, Vectors &normals) {
-#if defined(USE_TINYGL)
+#if defined(USE_METAL) || defined(USE_TINYGL)
 	if(!part.cull) {
-		tglEnable(TGL_CULL_FACE);
+		_raster.enable(TGL_CULL_FACE);
 	}
 
 	for (auto& prim : part.primitives) {
@@ -995,59 +999,59 @@ void Spriter::RenderMeshPartColor(MeshPart& part, Vectors& vertices, Vectors &no
 		TGLubyte g = (prim.color >> 8) & 0xff;
 		TGLubyte b = (prim.color >> 16) & 0xff;
 
-		tglColor4ub(r, g, b, 255);
+		_raster.color4ub(r, g, b, 255);
 
 		if (part.numVertices == 4) {
-			tglBegin(TGL_QUADS);
+			_raster.begin(TGL_QUADS);
 		} else {
-			tglBegin(TGL_TRIANGLES);
+			_raster.begin(TGL_TRIANGLES);
 		}
 		for (uint32 i = 0; i < part.numVertices; ++i) {
 			uint32 index = prim.indices[i];
 
 			Math::Vector3d n = normals[index].getNormalized();
-			tglNormal3f(n.x(), n.y(), n.z());
+			_raster.normal3f(n.x(), n.y(), n.z());
 
 			Math::Vector3d& v = vertices[index];
-			tglVertex3f(v.x(), v.y(), v.z());
+			_raster.vertex3f(v.x(), v.y(), v.z());
 		}
-		tglEnd();
+		_raster.end();
 	}
-	tglDisable(TGL_CULL_FACE);
+	_raster.disable(TGL_CULL_FACE);
 #endif
 }
 
 void Spriter::RenderMeshPartTexture(MeshPart& part, Vectors& vertices, Vectors &normals) {
-#if defined(USE_TINYGL)
+#if defined(USE_METAL) || defined(USE_TINYGL)
 	if (!part.cull) {
-		tglEnable(TGL_CULL_FACE);
+		_raster.enable(TGL_CULL_FACE);
 	}
 
-	tglEnable(TGL_TEXTURE_2D);
-	tglColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+	_raster.enable(TGL_TEXTURE_2D);
+	_raster.color4f(1.0f, 1.0f, 1.0f, 1.0f);
 
 	for (auto& prim : part.primitives) {
-		tglBindTexture(TGL_TEXTURE_2D, _texture[prim.texture]);
+		_raster.bindTexture(TGL_TEXTURE_2D, _texture[prim.texture]);
 
 		if (part.numVertices == 4) {
-			tglBegin(TGL_QUADS);
+			_raster.begin(TGL_QUADS);
 		} else {
-			tglBegin(TGL_TRIANGLES);
+			_raster.begin(TGL_TRIANGLES);
 		}
 		for (uint32 i = 0; i < part.numVertices; ++i) {
 			uint index = prim.indices[i];
-			tglTexCoord2f(prim.uv[i].getX() / 256.0f, prim.uv[i].getY() / 256.0f);
+			_raster.texCoord2f(prim.uv[i].getX() / 256.0f, prim.uv[i].getY() / 256.0f);
 
 			Math::Vector3d n = normals[index].getNormalized();
-			tglNormal3f(n.x(), n.y(), n.z());
+			_raster.normal3f(n.x(), n.y(), n.z());
 
 			Math::Vector3d& v = vertices[index];
-			tglVertex3f(v.x(), v.y(), v.z());
+			_raster.vertex3f(v.x(), v.y(), v.z());
 		}
-		tglEnd();
+		_raster.end();
 	}
-	tglDisable(TGL_TEXTURE_2D);
-	tglDisable(TGL_CULL_FACE);
+	_raster.disable(TGL_TEXTURE_2D);
+	_raster.disable(TGL_CULL_FACE);
 #endif
 }
 
@@ -1113,49 +1117,51 @@ void Spriter::RenderModel(Model &model) {
 	MatrixRotateZ(_view.rotation.z());
 	MatrixTranslate(-_view.position.x(), -_view.position.y(), -_view.position.z());
 
-#if defined(USE_TINYGL)
-	tglViewport(0, 0, _vm->screen().w, _vm->screen().h);
+#if defined(USE_METAL) || defined(USE_TINYGL)
+	_raster.makeCurrent();
+	_raster.copyBackground(_vm->screen());
+	_raster.viewport(0, 0, _vm->screen().w, _vm->screen().h);
 
-	tglMatrixMode(TGL_PROJECTION);
-	tglLoadIdentity();
-	tglFrustum(-1.0f, 1.0f, -3.0f / 4.0f, 3.0f / 4.0f, 1.0f, 1000.0f);
+	_raster.matrixMode(TGL_PROJECTION);
+	_raster.loadIdentity();
+	_raster.frustum(-1.0f, 1.0f, -3.0f / 4.0f, 3.0f / 4.0f, 1.0f, 1000.0f);
 	// GL uses bottom left system
-	tglScalef(1.0f, -1.0f, 1.0f);
+	_raster.scalef(1.0f, -1.0f, 1.0f);
 	// Z is inverted in GL, we need to invert the face orientation too.
-	tglScalef(1.0f, 1.0f, -1.0f);
-	tglFrontFace(TGL_CW);
+	_raster.scalef(1.0f, 1.0f, -1.0f);
+	_raster.frontFace(TGL_CW);
 
-	tglMatrixMode(TGL_MODELVIEW);
-	tglLoadIdentity();
+	_raster.matrixMode(TGL_MODELVIEW);
+	_raster.loadIdentity();
 
 	// TODO: Use GL's view matrix instead of the game one.
-	// tglRotatef(_view.rotation.x(), 1.0f, 0.0f, 0.0f);
-	// tglRotatef(_view.rotation.y(), 0.0f, 1.0f, 0.0f);
-	// tglRotatef(_view.rotation.z(), 0.0f, 0.0f, 1.0f);
-	// tglTranslatef(-_view.position.x(), -_view.position.y(), -_view.position.z());
+	// _raster.rotatef(_view.rotation.x(), 1.0f, 0.0f, 0.0f);
+	// _raster.rotatef(_view.rotation.y(), 0.0f, 1.0f, 0.0f);
+	// _raster.rotatef(_view.rotation.z(), 0.0f, 0.0f, 1.0f);
+	// _raster.translatef(-_view.position.x(), -_view.position.y(), -_view.position.z());
 
-	tglEnable(TGL_DEPTH_TEST);
-	tglDepthFunc(TGL_LESS);
-	tglDepthMask(TGL_TRUE);
-	tglClearDepth(1.0f);
-	tglShadeModel(TGL_SMOOTH);
+	_raster.enable(TGL_DEPTH_TEST);
+	_raster.depthFunc(TGL_LESS);
+	_raster.depthMask(TGL_TRUE);
+	_raster.clearDepth(1.0f);
+	_raster.shadeModel(TGL_SMOOTH);
 
-	tglClear(TGL_DEPTH_BUFFER_BIT);
+	_raster.clear(TGL_DEPTH_BUFFER_BIT);
 
 #if 0
 	// TODO: Remove. Used only for debugging of the normals calculation and rendering.
-	tglEnable(TGL_LIGHTING);
+	_raster.enable(TGL_LIGHTING);
 	TGLfloat light_position[] = { 0.0, 0.0, 0.0, 1.0 };
-	tglLightfv(TGL_LIGHT0, TGL_POSITION, light_position);
-	tglLightf(TGL_LIGHT0, TGL_CONSTANT_ATTENUATION, 1000.0f);
-	tglEnable(TGL_LIGHT0);
+	_raster.lightfv(TGL_LIGHT0, TGL_POSITION, light_position);
+	_raster.lightf(TGL_LIGHT0, TGL_CONSTANT_ATTENUATION, 1000.0f);
+	_raster.enable(TGL_LIGHT0);
 #endif
 #endif
 
 	RunRenderProgram(model, false);
 
-#if defined(USE_TINYGL)
-	TinyGL::presentBuffer();
+#if defined(USE_METAL) || defined(USE_TINYGL)
+	_raster.readInto(_vm->screen());
 #endif
 }
 

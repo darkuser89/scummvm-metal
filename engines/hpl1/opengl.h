@@ -25,7 +25,9 @@
 #include "common/ptr.h"
 #include "common/scummsys.h"
 #include "graphics/opengl/context.h"
+#ifdef USE_OPENGL_GAME
 #include "graphics/opengl/system_headers.h"
+#endif
 
 #if defined(USE_OPENGL_GAME) && !USE_FORCED_GLES2 && !USE_FORCED_GLES
 

@@ -22,9 +22,14 @@
 #include "watchmaker/3d/render/opengl_renderer.h"
 #include "watchmaker/t3d.h"
 
-#if defined(USE_OPENGL_GAME)
+#if defined(USE_OPENGL_GAME) || defined(USE_METAL)
 
+#ifdef USE_OPENGL_GAME
 #include "graphics/opengl/system_headers.h"
+#endif
+#ifdef USE_METAL
+#include "watchmaker/3d/render/metal.h"
+#endif
 #include "math/glmath.h"
 
 #include "math/glmath.h"
@@ -34,6 +39,13 @@ namespace Watchmaker {
 OpenGLRenderer *g_renderer = nullptr;
 
 void OpenGLRenderer::drawIndexedPrimitivesVBO(PrimitiveType primitiveType, Common::SharedPtr<VertexBuffer> VBO, int firstVertex, int numVertices, Common::Array<uint16> faces, uint32 numFaces) {
+#ifdef USE_METAL
+	if (usingMetal()) {
+		if (!VBO || numFaces > faces.size()) ::error("Watchmaker: invalid native vertex buffer");
+		drawMetalBatch(primitiveType, *VBO, faces.data(), numFaces); return;
+	}
+#endif
+#ifdef USE_OPENGL_GAME
 	assert(numFaces <= faces.size());
 
 	assert(primitiveType == PrimitiveType::TRIANGLE);
@@ -78,9 +90,17 @@ void OpenGLRenderer::drawIndexedPrimitivesVBO(PrimitiveType primitiveType, Commo
 	glMatrixMode(GL_PROJECTION);
 	glPopMatrix();
 	glMatrixMode(GL_MODELVIEW);
+
+#else
+
+#endif
 }
 
 void OpenGLRenderer::drawPrimitives(PrimitiveType primitiveType, Vertex *vertices, int numPrimitives) {
+#ifdef USE_METAL
+	if (usingMetal()) { drawMetalVertices(primitiveType, vertices, numPrimitives); return; }
+#endif
+#ifdef USE_OPENGL_GAME
 	assert(primitiveType == PrimitiveType::TRIANGLE);
 	glBegin(GL_TRIANGLES);
 	for (int i = 0; i < numPrimitives; i++) {
@@ -90,6 +110,10 @@ void OpenGLRenderer::drawPrimitives(PrimitiveType primitiveType, Vertex *vertice
 	}
 	glEnd();
 	glFlush();
+
+#else
+
+#endif
 }
 void OpenGLRenderer::drawIndexedPrimitivesVBO(PrimitiveType primitiveType, int VBO, int firstVertex, int numVertices, uint16 *faces, uint32 numFaces) {
 	//warning("TODO: Implement drawIndexedPrimitivesVBO");
@@ -105,31 +129,59 @@ void OpenGLRenderer::drawIndexedPrimitivesVBO(PrimitiveType primitiveType, gBatc
 }
 
 void OpenGLRenderer::setTransformMatrix(TransformMatrix which, const Matrix4x4 &matrix) {
+#ifdef USE_METAL
+	if (usingMetal()) { setMetalTransform(which, matrix); return; }
+#endif
+#ifdef USE_OPENGL_GAME
 	GLint oldMatrixMode;
 	glGetIntegerv(GL_MATRIX_MODE, &oldMatrixMode);
 	glMatrixMode(GL_MODELVIEW);
 	glLoadMatrixf(matrix.data);
 	glScalef(1.0f, 1.0f, -1.0f);
 	glMatrixMode(oldMatrixMode);
+
+#else
+
+#endif
 }
 
 void OpenGLRenderer::pushModelView() {
+#ifdef USE_METAL
+	if (usingMetal()) { pushMetalModelView(); return; }
+#endif
+#ifdef USE_OPENGL_GAME
 	GLint oldMatrixMode;
 	glGetIntegerv(GL_MATRIX_MODE, &oldMatrixMode);
 	glMatrixMode(GL_MODELVIEW);
 	glPushMatrix();
 	glMatrixMode(oldMatrixMode);
+
+#else
+
+#endif
 }
 
 void OpenGLRenderer::popModelView() {
+#ifdef USE_METAL
+	if (usingMetal()) { popMetalModelView(); return; }
+#endif
+#ifdef USE_OPENGL_GAME
 	GLint oldMatrixMode;
 	glGetIntegerv(GL_MATRIX_MODE, &oldMatrixMode);
 	glMatrixMode(GL_MODELVIEW);
 	glPopMatrix();
 	glMatrixMode(oldMatrixMode);
+
+#else
+
+#endif
 }
 
 void OpenGLRenderer::setTextureWrapMode(int index, TextureWrapMode mode) {
+#ifdef USE_METAL
+	if (usingMetal()) { setMetalWrap(mode); return; }
+#endif
+#ifdef USE_OPENGL_GAME
 	GLint openGlWrapMode = 0;
 	switch (mode) {
 	case TextureWrapMode::WRAP:
@@ -143,19 +195,35 @@ void OpenGLRenderer::setTextureWrapMode(int index, TextureWrapMode mode) {
 	}
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, openGlWrapMode);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, openGlWrapMode);
+
+#else
+
+#endif
 }
 
 void OpenGLRenderer::setTexture(int stage, void *texture) {
+#ifdef USE_METAL
+	if (usingMetal()) {
+		if (texture) ::error("Watchmaker: unknown native texture handle");
+		bindMetalTexture(nullptr); return;
+	}
+#endif
+#ifdef USE_OPENGL_GAME
 	if (texture == nullptr) {
 		glBindTexture(GL_TEXTURE_2D, 0);
 	} else {
 		assert(0);
 	}
+
+#else
+
+#endif
 }
 void OpenGLRenderer::setTexture(int stage, const gTexture &texture) {
 	texture._texture->bind();
 }
 
+#ifdef USE_OPENGL_GAME
 void setGlFeature(GLint feature, bool state) {
 	if (state) {
 		glEnable(feature);
@@ -164,7 +232,13 @@ void setGlFeature(GLint feature, bool state) {
 	}
 }
 
+#endif
+
 void OpenGLRenderer::setRenderState(RenderState state, int value) {
+#ifdef USE_METAL
+	if (usingMetal()) { setMetalState(state, value); return; }
+#endif
+#ifdef USE_OPENGL_GAME
 	switch (state) {
 	case RenderState::ZENABLE:
 		glDepthFunc(GL_LEQUAL);
@@ -187,8 +261,13 @@ void OpenGLRenderer::setRenderState(RenderState state, int value) {
 		break;
 	}
 	//warning("TODO: Implement setRenderState");
+
+#else
+
+#endif
 }
 
+#ifdef USE_OPENGL_GAME
 GLenum translateBlendFactorToGL(BlendFactor factor) {
 	switch (factor) {
 	case BlendFactor::ONE:
@@ -212,11 +291,25 @@ GLenum translateBlendFactorToGL(BlendFactor factor) {
 	}
 }
 
+#endif
+
 void OpenGLRenderer::setBlendFunc(BlendFactor src, BlendFactor dst) {
+#ifdef USE_METAL
+	if (usingMetal()) { setMetalBlend(src, dst); return; }
+#endif
+#ifdef USE_OPENGL_GAME
 	glBlendFunc(translateBlendFactorToGL(src), translateBlendFactorToGL(dst));
+
+#else
+
+#endif
 }
 
 void OpenGLRenderer::enter2Dmode() {
+#ifdef USE_METAL
+	if (usingMetal()) { enterMetal2D(); return; }
+#endif
+#ifdef USE_OPENGL_GAME
 	glMatrixMode(GL_PROJECTION);
 	glPushMatrix();
 	glLoadIdentity();
@@ -224,14 +317,26 @@ void OpenGLRenderer::enter2Dmode() {
 	glPushMatrix();
 	glLoadIdentity();
 	checkGlError("Exiting enter2Dmode");
+
+#else
+
+#endif
 }
 
 void OpenGLRenderer::exit2Dmode() {
+#ifdef USE_METAL
+	if (usingMetal()) { exitMetal2D(); return; }
+#endif
+#ifdef USE_OPENGL_GAME
 	glPopMatrix();
 	glMatrixMode(GL_PROJECTION);
 	glPopMatrix();
 	glMatrixMode(GL_MODELVIEW);
 	checkGlError("exit2Dmode");
+
+#else
+
+#endif
 }
 
 } // End of namespace Watchmaker

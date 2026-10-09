@@ -603,6 +603,11 @@ void SdlGraphicsManager::initImGui(SDL_Renderer *renderer, void *glContext) {
 	io.IniFilename = nullptr;
 
 	_imGuiSDLRenderer = nullptr;
+#ifdef USE_METAL
+	_imGuiUsesMetal = initMetalImGui();
+	if (_imGuiUsesMetal)
+		_imGuiReady = true;
+#endif
 #ifdef USE_OPENGL
 	if (!_imGuiReady && glContext) {
 		// Only OpenGL and GLES2 are supported, not GLES
@@ -709,7 +714,10 @@ void SdlGraphicsManager::renderImGui() {
 	} else {
 #endif
 #ifdef USE_OPENGL
-		ImGui_ImplOpenGL3_NewFrame();
+#ifdef USE_METAL
+		if (!_imGuiUsesMetal)
+#endif
+			ImGui_ImplOpenGL3_NewFrame();
 #endif
 #if defined(USE_IMGUI_SDLRENDERER2) || defined(USE_IMGUI_SDLRENDERER3)
 	}
@@ -726,6 +734,12 @@ void SdlGraphicsManager::renderImGui() {
 	g_eventRec.showImGui();
 #endif
 	ImGui::Render();
+#ifdef USE_METAL
+	if (_imGuiUsesMetal) {
+		renderMetalImGui();
+		return;
+	}
+#endif
 #ifdef USE_IMGUI_SDLRENDERER3
 	if (_imGuiSDLRenderer) {
 		ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), _imGuiSDLRenderer);
@@ -760,6 +774,20 @@ void SdlGraphicsManager::destroyImGui() {
 
 	_imGuiInited = false;
 	_imGuiReady = false;
+
+#ifdef USE_METAL
+	if (_imGuiUsesMetal) {
+		destroyMetalImGui();
+		_imGuiUsesMetal = false;
+#if SDL_VERSION_ATLEAST(3, 0, 0)
+		ImGui_ImplSDL3_Shutdown();
+#else
+		ImGui_ImplSDL2_Shutdown();
+#endif
+		ImGui::DestroyContext();
+		return;
+	}
+#endif
 
 #ifdef USE_IMGUI_SDLRENDERER3
 	if (_imGuiSDLRenderer) {

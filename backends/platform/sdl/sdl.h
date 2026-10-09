@@ -32,7 +32,7 @@
 
 #include "common/array.h"
 
-#ifdef USE_OPENGL
+#if defined(USE_OPENGL) || defined(USE_METAL)
 #define USE_MULTIPLE_RENDERERS
 #endif
 
@@ -102,9 +102,15 @@ public:
 	virtual Common::Path getDefaultDLCsPath();
 	virtual Common::Path getScreenshotsPath();
 
+#ifdef USE_METAL
+	Graphics::Metal::Renderer *getMetalRenderer() const override;
+#endif
+
 #if defined(USE_OPENGL_GAME) || defined(USE_OPENGL_SHADERS)
-	Common::Array<uint> getSupportedAntiAliasingLevels() const override;
 	OpenGL::ContextType getOpenGLType() const override { return _oglType; }
+#endif
+#if defined(USE_OPENGL_GAME) || defined(USE_OPENGL_SHADERS) || defined(USE_METAL)
+	Common::Array<uint> getSupportedAntiAliasingLevels() const override;
 #endif
 #if defined(USE_OPENGL) && defined(USE_GLAD)
 	void *getOpenGLProcAddress(const char *name) const override;
@@ -141,6 +147,10 @@ protected:
 	 * The SDL output window.
 	 */
 	SdlWindow *_window;
+#ifdef USE_METAL
+	// Preserve native engine resources when replacing the graphics manager.
+	Graphics::Metal::Renderer *_metalRenderer = nullptr;
+#endif
 
 	SdlGraphicsManager::State _gfxManagerState;
 
@@ -174,6 +184,9 @@ protected:
 #ifdef USE_OPENGL
 		GraphicsManagerOpenGL,
 #endif
+#ifdef USE_METAL
+		GraphicsManagerMetal,
+#endif
 		GraphicsManagerCount
 	};
 
@@ -185,6 +198,9 @@ protected:
 	int _lastMode[GraphicsManagerCount];
 	int _defaultMode[GraphicsManagerCount];
 	int _supports3D[GraphicsManagerCount];
+#ifdef USE_METAL
+	bool _supportsMetal[GraphicsManagerCount];
+#endif
 
 	/**
 	 * Create the merged graphics modes list.

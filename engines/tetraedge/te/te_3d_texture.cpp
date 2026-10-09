@@ -20,6 +20,9 @@
  */
 
 #include "tetraedge/tetraedge.h"
+#ifdef USE_METAL
+#include "tetraedge/te/te_renderer_metal.h"
+#endif
 #include "tetraedge/te/te_3d_texture.h"
 #include "tetraedge/te/te_3d_texture_opengl.h"
 #include "tetraedge/te/te_3d_texture_tinygl.h"
@@ -106,6 +109,11 @@ TeVector2s32 Te3DTexture::optimisedSize(const TeVector2s32 &size) {
 /*static*/
 Te3DTexture *Te3DTexture::makeInstance() {
 	Graphics::RendererType r = g_engine->preferredRendererType();
+
+#ifdef USE_METAL
+	if (r == Graphics::kRendererTypeMetal)
+		return new Te3DTextureMetal();
+#endif
 
 #if defined(USE_OPENGL_GAME)
 	if (r == Graphics::kRendererTypeOpenGL)

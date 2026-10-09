@@ -39,6 +39,9 @@ namespace Colony {
 
 // Forward declaration for the fixed-function OpenGL renderer factory.
 Renderer *createOpenGLRenderer(OSystem *system, int width, int height);
+#ifdef USE_METAL
+Renderer *createMetalRenderer(OSystem *system, int width, int height);
+#endif
 
 Common::Point windowToCanvas(const Common::Rect &viewport, const Common::Point &p, int canvasW, int canvasH) {
 	if (viewport.isEmpty() || canvasW <= 0 || canvasH <= 0)
@@ -71,6 +74,10 @@ Graphics::RendererType pickRendererType() {
 	const Graphics::RendererType desired = Graphics::Renderer::parseTypeCode(configured);
 
 	if (desired == Graphics::kRendererTypeDefault) {
+#ifdef USE_METAL
+		if (g_system->hasFeature(OSystem::kFeatureMetalForGame))
+			return Graphics::kRendererTypeMetal;
+#endif
 #ifdef USE_OPENGL_GAME
 		return Graphics::kRendererTypeOpenGL;
 #elif defined(USE_OPENGL_SHADERS)
@@ -81,6 +88,9 @@ Graphics::RendererType pickRendererType() {
 	}
 
 	const uint32 supported =
+#ifdef USE_METAL
+		Graphics::kRendererTypeMetal |
+#endif
 #ifdef USE_OPENGL_GAME
 		Graphics::kRendererTypeOpenGL |
 #endif
@@ -103,7 +113,12 @@ Renderer *createRenderer(OSystem *system, int width, int height) {
 	// system, but its display aspect is still 16:9 after pixel-aspect
 	// correction. Request a 16:9 window instead of the raw 853:350 canvas.
 	const int displayHeight = ConfMan.getBool("widescreen_mod") ? (width * 9 + 8) / 16 : height;
-	initGraphics3d(width, displayHeight);
+	initGraphics3d(width, displayHeight, type == Graphics::kRendererTypeMetal);
+
+#ifdef USE_METAL
+	if (type == Graphics::kRendererTypeMetal)
+		return createMetalRenderer(system, width, height);
+#endif
 
 #if defined(USE_OPENGL_SHADERS)
 	if (type == Graphics::kRendererTypeOpenGLShaders) {

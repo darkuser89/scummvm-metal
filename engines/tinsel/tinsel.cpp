@@ -1049,16 +1049,13 @@ Common::Error TinselEngine::run() {
 
 		initGraphics(width, height, &noirFormat);
 
-#if defined(USE_TINYGL)
-		// TODO: Find minimal viable drawcall memory
-		constexpr uint32 drawCallMemory = 1024 * 1024;
-		TinyGL::createContext(width, 432, noirFormat, 256, false, false, drawCallMemory);
-		TinyGL::getSurfaceRef(_screenSurface);
+#if defined(USE_METAL) || defined(USE_TINYGL)
+		_screenSurface.create(width, 432, noirFormat);
 
 		_spriter = new Spriter();
 		_spriter->Init(width, 432);
 #else
-		return Common::Error(Common::kUnsupportedGameidError, _s("Discworld Noir needs ScummVM with TinyGL enabled"));
+		return Common::Error(Common::kUnsupportedGameidError, _s("Discworld Noir needs ScummVM with Metal or TinyGL enabled"));
 #endif
 	} else if (getGameID() == GID_DW2) {
 		if (ConfMan.getBool("crop_black_bars"))

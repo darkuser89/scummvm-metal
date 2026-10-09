@@ -51,6 +51,7 @@ public:
 	Fonts *_fonts = nullptr;
 	Common::Rect _viewport;
 	Renderer(WGame *game, sdl_wrapper *wrapper);
+	~Renderer();
 	bool addMaterial(gMaterial &material, const Common::String &name, int NumFaces, unsigned int LoaderFlags);
 
 	void initGL();

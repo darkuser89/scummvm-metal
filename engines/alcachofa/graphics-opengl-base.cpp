@@ -93,6 +93,11 @@ IRenderer *IRenderer::createOpenGLRenderer(Point resolution) {
 
 	IRenderer *renderer = nullptr;
 	switch (rendererType) {
+#ifdef USE_METAL
+	case kRendererTypeMetal:
+		renderer = createMetalRenderer(resolution);
+		break;
+#endif
 	case kRendererTypeOpenGLShaders:
 		renderer = createOpenGLRendererShaders(resolution);
 		break;
@@ -103,6 +108,11 @@ IRenderer *IRenderer::createOpenGLRenderer(Point resolution) {
 		renderer = createTinyGLRenderer(resolution);
 		break;
 	default:
+#ifdef USE_METAL
+		if (available & kRendererTypeMetal)
+			renderer = createMetalRenderer(resolution);
+		else
+#endif
 		if (available & kRendererTypeOpenGLShaders)
 			renderer = createOpenGLRendererShaders(resolution);
 		else if (available & kRendererTypeOpenGL)

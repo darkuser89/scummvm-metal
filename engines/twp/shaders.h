@@ -63,6 +63,7 @@ public:
 	int getNumTextures() override;
 	int getTexture(int index) override;
 	int getTextureLoc(int index) override;
+	Texture *getTextureObject(int index) override;
 
 private:
 	void applyUniforms() override;

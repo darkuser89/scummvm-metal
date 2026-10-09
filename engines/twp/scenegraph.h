@@ -24,6 +24,7 @@
 
 #include "common/array.h"
 #include "common/str.h"
+#include "common/str-array.h"
 #include "math/vector2d.h"
 #include "math/matrix4.h"
 #include "twp/gfx.h"

@@ -33,8 +33,8 @@
 #include "math/vector2d.h"
 #include "math/matrix4.h"
 
-#if defined(USE_TINYGL)
-#include "graphics/tinygl/tinygl.h"
+#if defined(USE_METAL) || defined(USE_TINYGL)
+#include "graphics/surface-rasterizer.h"
 #endif
 
 namespace Tinsel {
@@ -214,7 +214,8 @@ private:
 	Common::Array<uint8> _textureData;
 
 	bool _textureGenerated;
-#if defined(USE_TINYGL)
+#if defined(USE_METAL) || defined(USE_TINYGL)
+	Graphics::SurfaceRasterizer _raster;
 	uint _texture[4];
 #endif
 

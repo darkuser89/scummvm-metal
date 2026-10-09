@@ -491,6 +491,9 @@ int main(int argc, char *argv[]) {
 #endif
 	}
 
+	if (projectType == kProjectCMake && getFeatureBuildState("metal", setup.features))
+		setup.defines.push_back("MACOSX");
+
 	for (FeatureList::const_iterator i = setup.features.begin(); i != setup.features.end(); ++i) {
 		if (i->enable) {
 			if (!strcmp(i->name, "updates"))
@@ -1219,6 +1222,9 @@ const Feature s_features[] = {
 	{            "mt32emu",                   "USE_MT32EMU", false, true,  "integrated MT-32 emulator" },
 	{               "nasm",                      "USE_NASM", false, true,  "IA-32 assembly support" }, // This feature is special in the regard, that it needs additional handling.
 	{             "opengl",                    "USE_OPENGL", false, true,  "OpenGL support" },
+	{              "metal",                     "USE_METAL", false, false, "Metal 3 on macOS (Apple M1-M6)" },
+	{       "game_shaders",                              "", false, true, "Game rendering with shaders" },
+	{       "game_classic",                              "", false, true, "Classic game rendering" },
 	{"opengl_game_classic",               "USE_OPENGL_GAME", false, true,  "OpenGL support (classic) in 3d games" },
 	{"opengl_game_shaders",            "USE_OPENGL_SHADERS", false, true,  "OpenGL support (shaders) in 3d games" },
 	{             "tinygl",                    "USE_TINYGL", false, true,  "TinyGL support (software) in 3d games" },
@@ -1324,6 +1330,11 @@ FeatureList getAllFeatures() {
  * This means disabling conflicting features, enabling meta-features, ...
  */
 static void fixupFeatures(ProjectType projectType, BuildSetup &setup) {
+	if (getFeatureBuildState("metal", setup.features)) {
+		if ((projectType != kProjectXcode && projectType != kProjectCMake) ||
+		    setup.appleEmbedded || setup.useSDL != kSDLVersion2)
+			error("Metal 3 requires a macOS Xcode or CMake project using SDL 2.0.14+");
+	}
 #ifdef ENABLE_XCODE
 	// IMGUI and NASM are not available on Xcode
 	if (projectType == kProjectXcode) {
@@ -1371,18 +1382,23 @@ static void fixupFeatures(ProjectType projectType, BuildSetup &setup) {
 
 	// Check IMGUI dependencies
 	if (getFeatureBuildState("imgui", setup.features) && (
-		!getFeatureBuildState("opengl", setup.features) ||
+		(!getFeatureBuildState("opengl", setup.features) && !getFeatureBuildState("metal", setup.features)) ||
 		!getFeatureBuildState("freetype2", setup.features) ||
 		setup.useSDL == kSDLVersion1)) {
-		std::cerr << "WARNING: imgui requires opengl, freetype2 and sdl2+\n";
+		std::cerr << "WARNING: imgui requires OpenGL or Metal, freetype2 and sdl2+\n";
 		setFeatureBuildState("imgui", setup.features, false);
 	}
 
 	// Calculate 3D feature state
 	setFeatureBuildState("3d", setup.features,
 			getFeatureBuildState("tinygl", setup.features) ||
+			getFeatureBuildState("metal", setup.features) ||
 			getFeatureBuildState("opengl_game_classic", setup.features) ||
 			getFeatureBuildState("opengl_game_shaders", setup.features));
+	setFeatureBuildState("game_shaders", setup.features,
+		getFeatureBuildState("metal", setup.features) || getFeatureBuildState("opengl_game_shaders", setup.features));
+	setFeatureBuildState("game_classic", setup.features,
+		getFeatureBuildState("metal", setup.features) || getFeatureBuildState("opengl_game_classic", setup.features));
 
 }
 

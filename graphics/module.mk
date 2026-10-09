@@ -71,6 +71,14 @@ MODULE_OBJS := \
 	wincursor.o \
 	yuv_to_rgb.o
 
+ifdef USE_METAL
+MODULE_OBJS += metal/renderer.o metal/legacy-rasterizer.o metal/texture-decoder.o metal/retro/parser.o \
+	metal/retro/compiler.o metal/retro/pipeline.o
+ifdef USE_IMGUI
+MODULE_OBJS += metal/imgui.o
+endif
+endif
+
 ifdef USE_ARM_SCALER_ASM
 MODULE_OBJS += \
 	scaler/downscalerARM.o

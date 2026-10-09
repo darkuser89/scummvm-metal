@@ -28,10 +28,17 @@
 #include "hpl1/engine/resources/low_level_resources.h"
 #include "hpl1/engine/system/low_level_system.h"
 #include "hpl1/graphics.h"
+#ifdef USE_METAL
+#include "hpl1/engine/impl/low_level_graphics_metal.h"
+#endif
 
 namespace hpl {
 
 static iLowLevelGraphics *createLowLevelGfx() {
+#ifdef USE_METAL
+	if (Hpl1::useMetal())
+		return hplNew(LowLevelGraphicsMetal, ());
+#endif
 #ifdef HPL1_USE_OPENGL
 	if (Hpl1::useOpenGL())
 		return hplNew(cLowLevelGraphicsSDL, ());

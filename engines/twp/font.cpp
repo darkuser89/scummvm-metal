@@ -376,7 +376,7 @@ void Text::draw(Gfx &gfx, const Math::Matrix4 &t) {
 	}
 	if (_font && !_txt.empty()) {
 		update();
-		gfx.drawPrimitives(GL_TRIANGLES, _vertices.begin(), _vertices.size(), trsf, _texture);
+		gfx.drawPrimitives(kPrimitiveTriangles, _vertices.begin(), _vertices.size(), trsf, _texture);
 	}
 }
 

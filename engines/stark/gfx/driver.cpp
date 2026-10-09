@@ -23,6 +23,9 @@
 #include "engines/stark/gfx/opengl.h"
 #include "engines/stark/gfx/opengls.h"
 #include "engines/stark/gfx/tinygl.h"
+#ifdef USE_METAL
+#include "engines/stark/gfx/metal.h"
+#endif
 #include "engines/stark/services/services.h"
 #include "engines/stark/services/settings.h"
 
@@ -45,6 +48,9 @@ Driver *Driver::create() {
 	Common::String rendererConfig = ConfMan.get("renderer");
 	Graphics::RendererType desiredRendererType = Graphics::Renderer::parseTypeCode(rendererConfig);
 	Graphics::RendererType matchingRendererType = Graphics::Renderer::getBestMatchingAvailableType(desiredRendererType,
+#ifdef USE_METAL
+			Graphics::kRendererTypeMetal |
+#endif
 #if defined(USE_OPENGL_GAME)
 			Graphics::kRendererTypeOpenGL |
 #endif
@@ -58,11 +64,15 @@ Driver *Driver::create() {
 
 	bool softRenderer = matchingRendererType == Graphics::kRendererTypeTinyGL;
 	if (!softRenderer) {
-		initGraphics3d(kOriginalWidth, kOriginalHeight);
+		initGraphics3d(kOriginalWidth, kOriginalHeight, matchingRendererType == Graphics::kRendererTypeMetal);
 	} else {
 		initGraphics(kOriginalWidth, kOriginalHeight, nullptr);
 	}
 
+#ifdef USE_METAL
+	if (matchingRendererType == Graphics::kRendererTypeMetal)
+		return new MetalDriver();
+#endif
 #if defined(USE_OPENGL_SHADERS)
 	if (matchingRendererType == Graphics::kRendererTypeOpenGLShaders) {
 		return new OpenGLSDriver();

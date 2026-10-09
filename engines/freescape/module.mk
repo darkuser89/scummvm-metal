@@ -96,6 +96,10 @@ MODULE_OBJS := \
 	wb_atari.o \
 	zx_tape.o
 
+ifdef USE_METAL
+MODULE_OBJS += gfx_metal.o
+endif
+
 ifdef USE_TINYGL
 MODULE_OBJS += \
 	gfx_tinygl.o \

@@ -21,13 +21,18 @@
 
 #include "watchmaker/3d/render/opengl_texture.h"
 #include "common/textconsole.h"
+#ifdef USE_OPENGL_GAME
 #include "graphics/opengl/system_headers.h"
+#endif
+#ifdef USE_METAL
+#include "watchmaker/3d/render/metal.h"
+#endif
 #include "watchmaker/3d/dds_header.h"
 #include "watchmaker/render.h"
 
-#ifdef USE_OPENGL_GAME
-
 namespace Watchmaker {
+
+#ifdef USE_OPENGL_GAME
 
 GLuint dxtCompressionToTextureFormat(DxtCompression compression) {
 	switch (compression) {
@@ -87,10 +92,17 @@ public:
 	};
 };
 
+#endif
+
 Texture *createGLTexture() {
+#ifdef USE_METAL
+	if (usingMetal()) return createMetalTexture();
+#endif
+#ifdef USE_OPENGL_GAME
 	return new OpenGLTexture();
+#else
+	error("Watchmaker: no native renderer available");
+#endif
 }
 
 } // End of namespace Watchmaker
-
-#endif // USE_OPENGL_GAME

@@ -145,6 +145,12 @@ MODULE_OBJS := \
 	metaengine.o \
 	obb_archive.o
 
+ifdef USE_METAL
+MODULE_OBJS += \
+	game/characters_shadow_metal.o \
+	te/te_renderer_metal.o
+endif
+
 ifdef USE_TINYGL
 MODULE_OBJS += \
 	game/characters_shadow_tinygl.o \

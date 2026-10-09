@@ -128,7 +128,7 @@ void TeTextLayout::setText(const Common::String &val) {
 		Common::Path fontPath(parser.fontFile());
 		TetraedgeFSNode fontNode = g_engine->getCore()->findFile(fontPath);
 		TeIntrusivePtr<TeIFont> font;
-		if (parser.fontFile().hasSuffixIgnoreCase(".ttf"))
+		if (parser.fontFile().hasSuffixIgnoreCase(".ttf") || parser.fontFile().hasSuffixIgnoreCase(".otf"))
 			font = g_engine->getResourceManager()->getResource<TeFont3>(fontNode).get();
 		else
 			font = g_engine->getResourceManager()->getResource<TeFont2>(fontNode).get();

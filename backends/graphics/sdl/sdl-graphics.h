@@ -122,7 +122,7 @@ public:
 	/**
 	 * Gets the current state of the graphics manager.
 	 */
-	State getState() const;
+	virtual State getState() const;
 
 	/**
 	 * Sets up a basic state of the graphics manager.
@@ -230,7 +230,13 @@ protected:
 	bool _imGuiInited = false;
 	SDL_Renderer *_imGuiSDLRenderer = nullptr;
 
-	void initImGui(SDL_Renderer *renderer, void *glContext);
+	virtual void initImGui(SDL_Renderer *renderer, void *glContext);
+#ifdef USE_METAL
+	virtual bool initMetalImGui() { return false; }
+	virtual void renderMetalImGui() {}
+	virtual void destroyMetalImGui() {}
+	bool _imGuiUsesMetal = false;
+#endif
 	void renderImGui();
 	void destroyImGui();
 #endif

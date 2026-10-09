@@ -29,7 +29,9 @@
 #include "engines/util.h"
 #include "graphics/cursorman.h"
 #include "graphics/screen.h"
+#ifdef USE_OPENGL_SHADERS
 #include "graphics/opengl/system_headers.h"
+#endif
 #include "gui/message.h"
 #include "image/png.h"
 
@@ -1015,15 +1017,21 @@ Common::Error TwpEngine::run() {
 	const Common::String &gameTarget = ConfMan.getActiveDomainName();
 	AchMan.setActiveDomain(getMetaEngine()->getAchievementsInfo(gameTarget));
 
-	if (!g_system->hasFeature(OSystem::kFeatureShadersForGame)) {
+	bool metal = false;
+#ifdef USE_METAL
+	metal = g_system->hasFeature(OSystem::kFeatureMetalForGame);
+#endif
+	if (!metal && !g_system->hasFeature(OSystem::kFeatureShadersForGame)) {
 		return Common::Error(Common::kUnknownError, _s("This game requires OpenGL with shaders, which is not supported on your system"));
 	}
 
-	initGraphics3d(SCREEN_WIDTH, SCREEN_HEIGHT);
+	initGraphics3d(SCREEN_WIDTH, SCREEN_HEIGHT, metal);
 
-	if (!OpenGLContext.framebufferObjectSupported) {
+#ifdef USE_OPENGL_SHADERS
+	if (!metal && !OpenGLContext.framebufferObjectSupported) {
 		return Common::Error(Common::kUnknownError, _s("This game requires OpenGL Framebuffer Objects, which are not supported on your system"));
 	}
+#endif
 
 	// Set the engine's debugger console
 	setDebugger(new Console());

@@ -260,6 +260,10 @@ MODULE_OBJS += \
 	graphics/openglsdl/openglsdl-graphics.o
 endif
 
+ifdef USE_METAL
+MODULE_OBJS += graphics/metalsdl/metalsdl-graphics.o
+endif
+
 ifdef USE_DISCORD
 MODULE_OBJS += \
 	presence/discord/discord.o

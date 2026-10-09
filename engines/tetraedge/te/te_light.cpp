@@ -22,6 +22,9 @@
 #include "graphics/renderer.h"
 
 #include "tetraedge/tetraedge.h"
+#ifdef USE_METAL
+#include "tetraedge/te/te_renderer_metal.h"
+#endif
 
 #include "tetraedge/te/te_light.h"
 #include "tetraedge/te/te_light_opengl.h"
@@ -96,6 +99,11 @@ void TeLight::correctAttenuation() {
 /*static*/
 TeLight *TeLight::makeInstance() {
 	Graphics::RendererType r = g_engine->preferredRendererType();
+
+#ifdef USE_METAL
+	if (r == Graphics::kRendererTypeMetal)
+		return new TeLightMetal();
+#endif
 
 #if defined(USE_OPENGL_GAME)
 	if (r == Graphics::kRendererTypeOpenGL)

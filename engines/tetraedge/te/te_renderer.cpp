@@ -24,6 +24,9 @@
 
 #include "graphics/renderer.h"
 #include "tetraedge/tetraedge.h"
+#ifdef USE_METAL
+#include "tetraedge/te/te_renderer_metal.h"
+#endif
 
 #include "tetraedge/te/te_renderer.h"
 #include "tetraedge/te/te_renderer_opengl.h"
@@ -345,6 +348,11 @@ void TeRenderer::translate(float x, float y, float z) {
 /*static*/
 TeRenderer *TeRenderer::makeInstance() {
 	Graphics::RendererType r = g_engine->preferredRendererType();
+
+#ifdef USE_METAL
+	if (r == Graphics::kRendererTypeMetal)
+		return new TeRendererMetal();
+#endif
 
 #if defined(USE_OPENGL_GAME)
 	if (r == Graphics::kRendererTypeOpenGL)

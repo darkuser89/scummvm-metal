@@ -286,7 +286,12 @@ static void drawResources() {
 	ImGui::BeginChild("TexturePreview", ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_ResizeX | ImGuiChildFlags_ResizeY);
 	for (auto &res : g_twp->_resManager->_textures) {
 		if (_state->_textureSelected == res._key) {
-			ImGui::Image((ImTextureID)(intptr_t)res._value.id, ImVec2(res._value.width, res._value.height));
+			ImTextureID image = (ImTextureID)(intptr_t)res._value.id;
+#ifdef USE_METAL
+			if (res._value.metalTexture())
+				image = (ImTextureID)(uintptr_t)res._value.metalTexture();
+#endif
+			ImGui::Image(image, ImVec2(res._value.width, res._value.height));
 			break;
 		}
 	}

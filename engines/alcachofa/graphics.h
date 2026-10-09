@@ -95,6 +95,9 @@ public:
 	virtual void end() = 0;
 
 	static IRenderer *createOpenGLRenderer(Common::Point resolution);
+#ifdef USE_METAL
+	static IRenderer *createMetalRenderer(Common::Point resolution);
+#endif
 	static IRenderer *createOpenGLRendererClassic(Common::Point resolution);
 	static IRenderer *createOpenGLRendererShaders(Common::Point resolution);
 	static IRenderer *createTinyGLRenderer(Common::Point resolution);

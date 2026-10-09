@@ -51,7 +51,7 @@ void TeTextBase2::build() {
 
 	TeIntrusivePtr<TeIFont> font = _fonts[0];
 	if (!font.get()) {
-		warning("[TeTextBase2::build()] Warning : font missing");
+		warning("[TeTextBase2::build()] Font missing for text: %.80s", _text.c_str());
 		return;
 	}
 

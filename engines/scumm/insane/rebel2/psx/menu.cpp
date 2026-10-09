@@ -106,7 +106,7 @@ byte RA2PSXSettings::videoVolume() const {
 	return (byte)CLIP<int>(movies * 255 / kCDMaximum, 0, 255);
 }
 
-#ifdef USE_TINYGL
+#if defined(USE_METAL) || defined(USE_TINYGL)
 
 // A full screen quad in the GPU's subtract mode: level 0 is untouched, 0xff is black.
 struct RA2PSXMenuFade {
@@ -274,7 +274,7 @@ int hitTestMenu(Common::Rect (*itemRect)(int), int count, const Graphics::Surfac
 
 // The options list and its "adjust sound" page; the other four screens stay dimmed.
 void Rebel2PSX::runOptionsMenu(const RA2PSXOptionsUI &ui, RA2PSXSoundPlayer &sound,
-		RA2PSXTinyGLRenderer &renderer) {
+		RA2PSXRenderer &renderer) {
 	enum Screen {
 		kScreenMain,
 		kScreenSound
@@ -481,7 +481,7 @@ void Rebel2PSX::runOptionsMenu(const RA2PSXOptionsUI &ui, RA2PSXSoundPlayer &sou
 }
 
 int Rebel2PSX::runChapterSelect(const RA2PSXChapterSelectUI &ui) {
-	RA2PSXTinyGLRenderer renderer;
+	RA2PSXRenderer renderer;
 	if (!renderer.init(_vm->_screenWidth, _vm->_screenHeight))
 		return 0;
 
@@ -680,7 +680,7 @@ Rebel2PSX::MenuResult Rebel2PSX::runMainMenu(const RA2PSXMainMenuUI &ui,
 		kActionOptions
 	};
 
-	RA2PSXTinyGLRenderer renderer;
+	RA2PSXRenderer renderer;
 	if (!renderer.init(_vm->_screenWidth, _vm->_screenHeight))
 		return kMenuQuit;
 

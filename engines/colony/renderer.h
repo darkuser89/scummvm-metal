@@ -33,6 +33,8 @@
 #include "graphics/managed_surface.h"
 #include "graphics/font.h"
 
+class OSystem;
+
 namespace Colony {
 
 // CALCROBO.C projects both axes with (coordinate << 8) / depth.

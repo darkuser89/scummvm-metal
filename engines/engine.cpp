@@ -497,9 +497,18 @@ void initGraphics(int width, int height) {
 	initGraphics(width, height, &format);
 }
 
-void initGraphics3d(int width, int height) {
+void initGraphics3d(int width, int height, bool metal) {
+	int mode = 0;
+#ifdef USE_METAL
+	if (metal && ConfMan.get("gfx_mode") == "metal-fx") {
+		const OSystem::GraphicsMode *modes = g_system->getSupportedGraphicsModes();
+		for (uint i = 0; modes && modes[i].name; ++i)
+			if (!strcmp(modes[i].name, "metal-fx")) { mode = modes[i].id; break; }
+	}
+#endif
 	g_system->beginGFXTransaction();
-		g_system->setGraphicsMode(0, OSystem::kGfxModeRender3d);
+		if (!g_system->setGraphicsMode(mode, OSystem::kGfxModeRender3d | (metal ? OSystem::kGfxModeMetal : 0)))
+			error("Unable to select the requested 3D graphics backend");
 		initCommonGFX(true);
 		g_system->initSize(width, height);
 	OSystem::TransactionError gfxError = g_system->endGFXTransaction();

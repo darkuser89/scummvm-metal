@@ -20,9 +20,9 @@
 #include "common/str.h"
 #include "common/types.h"
 
-#ifdef USE_TINYGL
+#if defined(USE_METAL) || defined(USE_TINYGL)
 #include "graphics/surface.h"
-#include "graphics/tinygl/tinygl.h"
+#include "graphics/surface-rasterizer.h"
 #endif
 
 namespace Common {
@@ -449,11 +449,11 @@ private:
 	float _radius;
 };
 
-#ifdef USE_TINYGL
-class RA2PSXTinyGLRenderer {
+#if defined(USE_METAL) || defined(USE_TINYGL)
+class RA2PSXRenderer {
 public:
-	RA2PSXTinyGLRenderer();
-	~RA2PSXTinyGLRenderer();
+	RA2PSXRenderer();
+	~RA2PSXRenderer();
 
 	bool init(int width, int height);
 	void beginFrame(const Graphics::Surface &background);
@@ -483,7 +483,7 @@ private:
 			float normalX, float normalY, float normalZ, float depth);
 	TGLuint getTextureId(const RA2PSXTexture &texture);
 
-	TinyGL::ContextHandle *_context;
+	Graphics::SurfaceRasterizer _raster;
 	Common::Array<TextureBinding> _textureBindings;
 	const RA2PSXTexture *_activeTexture;
 	bool _textureEnabled;
@@ -525,10 +525,10 @@ private:
 			RA2PSXMovieTextSequence textSequence = kRA2PSXMovieTextNone);
 	bool playIntroSequence(const RA2PSXMovieText &movieText);
 	MenuResult runMainMenu(const RA2PSXMainMenuUI &ui, const RA2PSXOptionsUI &options);
-#ifdef USE_TINYGL
-	// TinyGL tracks one context, so the options screen borrows the title screen's renderer.
+#if defined(USE_METAL) || defined(USE_TINYGL)
+	// The options screen borrows the title screen's renderer and texture cache.
 	void runOptionsMenu(const RA2PSXOptionsUI &ui, RA2PSXSoundPlayer &sound,
-			RA2PSXTinyGLRenderer &renderer);
+			RA2PSXRenderer &renderer);
 #endif
 	// Returns the chosen chapter, 1 to 16, or 0 when the player backs out.
 	int runChapterSelect(const RA2PSXChapterSelectUI &ui);

@@ -28,6 +28,71 @@ Common::InSaveFile *RecorderSaveFileManager::openForLoading(const Common::String
 	return result;
 }
 
-Common::StringArray RecorderSaveFileManager::listSaveFiles(const Common::String &pattern) {
+Common::StringArray RecorderSaveFileManager::listSavefiles(const Common::String &pattern) {
 	return g_eventRec.listSaveFiles(pattern);
+}
+
+static bool usesRealSaveManager() {
+	GUI::EventRecorder::RecordMode mode = g_eventRec.getRecordMode();
+	return mode == GUI::EventRecorder::kRecorderRecord || mode == GUI::EventRecorder::kPassthrough;
+}
+
+Common::OutSaveFile *RecorderSaveFileManager::openForSaving(const Common::String &filename, bool compress) {
+	// Recording must write through the manager that will subsequently read and
+	// list the file. Separate DefaultSaveFileManager instances have separate caches.
+	if (usesRealSaveManager())
+		return g_eventRec.getRealSaveManager()->openForSaving(filename, compress);
+	return DefaultSaveFileManager::openForSaving(filename, compress);
+}
+
+Common::SeekableReadStream *RecorderSaveFileManager::openRawFile(const Common::String &filename) {
+	if (usesRealSaveManager())
+		return g_eventRec.getRealSaveManager()->openRawFile(filename);
+	return DefaultSaveFileManager::openRawFile(filename);
+}
+
+bool RecorderSaveFileManager::removeSavefile(const Common::String &filename) {
+	if (usesRealSaveManager())
+		return g_eventRec.getRealSaveManager()->removeSavefile(filename);
+	return DefaultSaveFileManager::removeSavefile(filename);
+}
+
+bool RecorderSaveFileManager::exists(const Common::String &filename) {
+	if (usesRealSaveManager())
+		return g_eventRec.getRealSaveManager()->exists(filename);
+	GUI::EventRecorder::RecordMode mode = g_eventRec.getRecordMode();
+	if (mode == GUI::EventRecorder::kRecorderPlayback || mode == GUI::EventRecorder::kRecorderUpdate) {
+		for (const Common::String &name : listSavefiles("*")) {
+			if (name.equalsIgnoreCase(filename))
+				return true;
+		}
+		return false;
+	}
+	return DefaultSaveFileManager::exists(filename);
+}
+
+void RecorderSaveFileManager::updateSavefilesList(Common::StringArray &lockedFiles) {
+	if (usesRealSaveManager())
+		g_eventRec.getRealSaveManager()->updateSavefilesList(lockedFiles);
+	else
+		DefaultSaveFileManager::updateSavefilesList(lockedFiles);
+}
+
+void RecorderSaveFileManager::clearError() {
+	if (usesRealSaveManager())
+		g_eventRec.getRealSaveManager()->clearError();
+	else
+		DefaultSaveFileManager::clearError();
+}
+
+Common::Error RecorderSaveFileManager::getError() {
+	return usesRealSaveManager() ? g_eventRec.getRealSaveManager()->getError() : DefaultSaveFileManager::getError();
+}
+
+Common::String RecorderSaveFileManager::getErrorDesc() {
+	return usesRealSaveManager() ? g_eventRec.getRealSaveManager()->getErrorDesc() : DefaultSaveFileManager::getErrorDesc();
+}
+
+Common::String RecorderSaveFileManager::popErrorDesc() {
+	return usesRealSaveManager() ? g_eventRec.getRealSaveManager()->popErrorDesc() : DefaultSaveFileManager::popErrorDesc();
 }

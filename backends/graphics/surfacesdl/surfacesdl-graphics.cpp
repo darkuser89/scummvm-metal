@@ -60,6 +60,13 @@
 #define SDL_FULLSCREEN  0x40000000
 #endif
 
+void SurfaceSdlGraphicsManager::restoreScalerSourceAfterOverlay() {
+	if (_needRestoreAfterOverlay) {
+		_scaler->setSource(nullptr, _tmpscreen->pitch, _videoMode.screenWidth, _videoMode.screenHeight, _maxExtraPixels);
+		_needRestoreAfterOverlay = false;
+	}
+}
+
 static void destroySurface(SDL_Surface *surface) {
 #if SDL_VERSION_ATLEAST(3, 0, 0)
 	SDL_DestroySurface(surface);
@@ -960,6 +967,14 @@ void SurfaceSdlGraphicsManager::initGraphicsSurface() {
 #endif
 }
 
+SDL_Surface *SurfaceSdlGraphicsManager::createOffscreenSurface(int width, int height) {
+#ifdef ENABLE_EVENTRECORDER
+	return g_eventRec.getSurface(width, height);
+#else
+	return nullptr;
+#endif
+}
+
 bool SurfaceSdlGraphicsManager::loadGFXMode() {
 	_forceRedraw = true;
 
@@ -1010,7 +1025,7 @@ bool SurfaceSdlGraphicsManager::loadGFXMode() {
 	_displayDisabled = ConfMan.getBool("disable_display");
 
 	if (_displayDisabled) {
-		_hwScreen = g_eventRec.getSurface(_videoMode.hardwareWidth, _videoMode.hardwareHeight);
+		_hwScreen = createOffscreenSurface(_videoMode.hardwareWidth, _videoMode.hardwareHeight);
 	} else
 #endif
 	{
@@ -1339,7 +1354,7 @@ void SurfaceSdlGraphicsManager::internUpdateScreen() {
 	if (_isDoubleBuf && _numDirtyRects)
 		_forceRedraw = true;
 
-#if defined(USE_IMGUI) && (defined(USE_IMGUI_SDLRENDERER2) || defined(USE_IMGUI_SDLRENDERER3))
+#if defined(USE_IMGUI) && (defined(USE_IMGUI_SDLRENDERER2) || defined(USE_IMGUI_SDLRENDERER3) || defined(USE_METAL))
 	if (_imGuiCallbacks.render) {
 		_forceRedraw = true;
 	}
@@ -1567,7 +1582,7 @@ void SurfaceSdlGraphicsManager::internUpdateScreen() {
 #endif
 
 		// Finally, blit all our changes to the screen
-		if (!_displayDisabled) {
+		if (needsDisplayUpdate()) {
 			updateScreen(_dirtyRectList, actualDirtyRects);
 #if SDL_VERSION_ATLEAST(2, 0, 0)
 			doPresent = true;
@@ -1585,12 +1600,12 @@ void SurfaceSdlGraphicsManager::internUpdateScreen() {
 
 #if SDL_VERSION_ATLEAST(2, 0, 0)
 
-#if defined(USE_IMGUI) && (defined(USE_IMGUI_SDLRENDERER2) || defined(USE_IMGUI_SDLRENDERER3))
+#if defined(USE_IMGUI) && (defined(USE_IMGUI_SDLRENDERER2) || defined(USE_IMGUI_SDLRENDERER3) || defined(USE_METAL))
 	renderImGui();
 #endif
 
 	if (doPresent) {
-		SDL_RenderPresent(_renderer);
+		presentScreen();
 	}
 #else
 	if (_isDoubleBuf)
@@ -3198,6 +3213,10 @@ void SurfaceSdlGraphicsManager::SDL_UpdateRects(SDL_Surface *screen, int numrect
 		SDL_RenderCopy(_renderer, _screenTexture, nullptr, &viewport);
 #endif
 	}
+}
+
+void SurfaceSdlGraphicsManager::presentScreen() {
+	SDL_RenderPresent(_renderer);
 }
 
 int SurfaceSdlGraphicsManager::SDL_SetColors(SDL_Surface *surface, SDL_Color *colors, int firstcolor, int ncolors) {

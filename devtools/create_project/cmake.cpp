@@ -86,7 +86,15 @@ void CMakeProvider::createWorkspace(const BuildSetup &setup) {
 		error("Could not open \"" + filename + "\" for writing");
 
 	workspace << "cmake_minimum_required(VERSION 3.13)\n";
+	if (getFeatureBuildState("metal", setup.features)) {
+		workspace << "set(CMAKE_OSX_ARCHITECTURES arm64 CACHE STRING \"Metal architecture\" FORCE)\n";
+		workspace << "set(CMAKE_OSX_DEPLOYMENT_TARGET 13.0 CACHE STRING \"Metal deployment target\" FORCE)\n";
+	}
 	workspace << "project(" << setup.projectDescription << ")\n\n";
+	if (getFeatureBuildState("metal", setup.features)) {
+		workspace << "if (NOT APPLE)\n  message(FATAL_ERROR \"Metal requires macOS\")\nendif()\n";
+		workspace << "enable_language(OBJCXX)\nset(CMAKE_OBJCXX_STANDARD 11)\nadd_compile_definitions(MACOSX)\n";
+	}
 
 	workspace << R"EOS(set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 11) # Globally enable C++11
@@ -336,6 +344,18 @@ void CMakeProvider::createProjectFile(const std::string &name, const std::string
 		for (const std::string &libraryDir : setup.libraryDirs)
 			libraryDirsList += libraryDir + ' ';
 		project << "target_link_libraries(" << name << " " << libraryDirsList << "${" << sdlLibrary->librariesVar << "} ${SCUMMVM_LIBS})\n";
+		if (getFeatureBuildState("metal", setup.features)) {
+			project << "find_path(METAL_SHADERC_INCLUDE shaderc/shaderc.h REQUIRED)\n"
+				"find_path(METAL_SPIRV_CROSS_INCLUDE spirv_cross/spirv_cross_c.h REQUIRED)\n"
+				"find_library(METAL_SHADERC_LIBRARY NAMES shaderc_shared REQUIRED)\n"
+				"find_library(METAL_SPIRV_CROSS_LIBRARY NAMES spirv-cross-c-shared REQUIRED)\n"
+				"target_include_directories(" << name << " PRIVATE ${METAL_SHADERC_INCLUDE} ${METAL_SPIRV_CROSS_INCLUDE})\n"
+				"target_link_libraries(" << name << " ${METAL_SHADERC_LIBRARY} ${METAL_SPIRV_CROSS_LIBRARY})\n";
+			project << "target_link_libraries(" << name << " \"-framework Metal\" \"-framework QuartzCore\" "
+				"\"-framework Foundation\" \"-framework Cocoa\" \"-framework ApplicationServices\" "
+				"\"-framework CoreFoundation\" \"-framework IOKit\" \"-framework AudioToolbox\" "
+				"\"-framework CoreAudio\" \"-framework CoreMIDI\" \"-framework AudioUnit\")\n";
+		}
 
 		project << "if (WIN32)\n";
 		project << "\ttarget_sources(" << name << " PUBLIC " << setup.filePrefix << "/dists/" << name << ".rc)\n";

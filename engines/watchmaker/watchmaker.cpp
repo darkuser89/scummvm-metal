@@ -38,7 +38,11 @@ WatchmakerGame::~WatchmakerGame() {
 int WMakerMain();
 
 Common::Error WatchmakerGame::run() {
-	initGraphics3d(800, 600);
+	bool metal = false;
+#ifdef USE_METAL
+	metal = g_system->hasFeature(OSystem::kFeatureMetalForGame);
+#endif
+	initGraphics3d(800, 600, metal);
 	WMakerMain();
 	return Common::kNoError;
 }

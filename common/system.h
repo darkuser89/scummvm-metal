@@ -43,6 +43,7 @@ class Mixer;
 namespace Graphics {
 class CursorManager;
 struct Surface;
+namespace Metal { class Renderer; }
 }
 
 namespace GUI {
@@ -519,6 +520,9 @@ public:
 		 */
 		kFeatureShadersForGame,
 
+		/** Native Metal 3 can be used by game renderers. */
+		kFeatureMetalForGame,
+
 		/**
 		 * If supported, this feature flag can be used to check if
 		 * waiting for vertical sync before refreshing the screen to reduce
@@ -788,7 +792,8 @@ public:
 
 	enum GfxModeFlags {
 		kGfxModeNoFlags = 0,         /**< No flags. */
-		kGfxModeRender3d = (1 << 0)  /**< Indicate 3D hardware-accelerated in-game GFX. */
+		kGfxModeRender3d = (1 << 0), /**< Indicate 3D hardware-accelerated in-game GFX. */
+		kGfxModeMetal = (1 << 1)     /**< Select native Metal for 3D rendering. */
 	};
 
 	/**
@@ -901,6 +906,10 @@ public:
 	virtual OpenGL::ContextType getOpenGLType() const {
 		return OpenGL::kContextNone;
 	}
+
+#ifdef USE_METAL
+	virtual Graphics::Metal::Renderer *getMetalRenderer() const { return nullptr; }
+#endif
 
 #if defined(USE_OPENGL) && defined(USE_GLAD)
 	/**

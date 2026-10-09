@@ -129,6 +129,9 @@
 // (the multi-viewports feature requires SDL features supported from SDL 2.0.4+. SDL 2.0.5+ is highly recommended)
 #include <SDL.h>
 #include <SDL_syswm.h>
+#ifdef USE_METAL
+#include <SDL_metal.h>
+#endif
 #include <stdio.h>              // for snprintf()
 #ifdef __APPLE__
 #include <TargetConditionals.h>
@@ -167,6 +170,7 @@ struct ImGui_ImplSDL2_Data
     char*                   ClipboardTextData;
     char                    BackendPlatformName[48];
     bool                    UseVulkan;
+    bool                    UseMetal;
     bool                    WantUpdateMonitors;
 
     // Mouse handling
@@ -699,7 +703,10 @@ bool ImGui_ImplSDL2_InitForD3D(SDL_Window* window)
 
 bool ImGui_ImplSDL2_InitForMetal(SDL_Window* window)
 {
-    return ImGui_ImplSDL2_Init(window, nullptr, nullptr);
+    if (!ImGui_ImplSDL2_Init(window, nullptr, nullptr))
+        return false;
+    ImGui_ImplSDL2_GetBackendData()->UseMetal = true;
+    return true;
 }
 
 bool ImGui_ImplSDL2_InitForSDLRenderer(SDL_Window* window, SDL_Renderer* renderer)
@@ -1016,6 +1023,10 @@ static void ImGui_ImplSDL2_GetWindowSizeAndFramebufferScale(SDL_Window* window, 
         w = h = 0;
     if (renderer != nullptr)
         SDL_GetRendererOutputSize(renderer, &display_w, &display_h);
+#ifdef USE_METAL
+    else if (SDL_GetWindowFlags(window) & SDL_WINDOW_METAL)
+        SDL_Metal_GetDrawableSize(window, &display_w, &display_h);
+#endif
 #if SDL_HAS_VULKAN
     else if (SDL_GetWindowFlags(window) & SDL_WINDOW_VULKAN)
         SDL_Vulkan_GetDrawableSize(window, &display_w, &display_h);
@@ -1113,6 +1124,10 @@ static void ImGui_ImplSDL2_CreateWindow(ImGuiViewport* viewport)
 
     Uint32 sdl_flags = 0;
     sdl_flags |= use_opengl ? SDL_WINDOW_OPENGL : (bd->UseVulkan ? SDL_WINDOW_VULKAN : 0);
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+    if (bd->UseMetal)
+        sdl_flags |= SDL_WINDOW_METAL;
+#endif
     sdl_flags |= SDL_GetWindowFlags(bd->Window) & SDL_WINDOW_ALLOW_HIGHDPI;
     sdl_flags |= SDL_WINDOW_HIDDEN;
     sdl_flags |= (viewport->Flags & ImGuiViewportFlags_NoDecoration) ? SDL_WINDOW_BORDERLESS : 0;

@@ -29,6 +29,9 @@
 namespace Graphics {
 
 static const RendererTypeDescription rendererTypes[] = {
+#ifdef USE_METAL
+	{ "metal", "Metal 3", kRendererTypeMetal },
+#endif
 #if defined(USE_OPENGL_GAME)
 	{ "opengl", _s("OpenGL"), kRendererTypeOpenGL },
 #endif
@@ -81,6 +84,11 @@ Common::String Renderer::getTypeCode(RendererType type) {
 uint32 Renderer::getAvailableTypes() {
 	uint32 available = 0;
 
+#ifdef USE_METAL
+	if (g_system->hasFeature(OSystem::kFeatureMetalForGame))
+		available |= kRendererTypeMetal;
+#endif
+
 #if defined(USE_TINYGL)
 	/* TinyGL doesn't depend on hardware support */
 	available |= kRendererTypeTinyGL;
@@ -119,6 +127,10 @@ RendererType Renderer::getBestMatchingType(RendererType desired, uint32 availabl
 		warning("Unable to create a '%s' renderer", getTypeCode(desired).c_str());
 	}
 
+#ifdef USE_METAL
+	if (available & kRendererTypeMetal)
+		return kRendererTypeMetal;
+#endif
 	/* Shaders are the best experience */
 	if (available & kRendererTypeOpenGLShaders) {
 		return kRendererTypeOpenGLShaders;

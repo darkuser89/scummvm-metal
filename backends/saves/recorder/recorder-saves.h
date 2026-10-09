@@ -28,8 +28,18 @@
  * Provides a savefile manager implementation for event recorder.
  */
 class RecorderSaveFileManager : public DefaultSaveFileManager {
-	virtual Common::StringArray listSaveFiles(const Common::String &pattern);
-	virtual Common::InSaveFile *openForLoading(const Common::String &filename);
+public:
+	Common::StringArray listSavefiles(const Common::String &pattern) override;
+	Common::InSaveFile *openForLoading(const Common::String &filename) override;
+	Common::OutSaveFile *openForSaving(const Common::String &filename, bool compress = true) override;
+	Common::SeekableReadStream *openRawFile(const Common::String &filename) override;
+	bool removeSavefile(const Common::String &filename) override;
+	bool exists(const Common::String &filename) override;
+	void updateSavefilesList(Common::StringArray &lockedFiles) override;
+	void clearError() override;
+	Common::Error getError() override;
+	Common::String getErrorDesc() override;
+	Common::String popErrorDesc() override;
 };
 
 #endif

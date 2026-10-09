@@ -24,13 +24,33 @@
 
 #include "common/array.h"
 #include "common/hashmap.h"
+#include "common/hash-str.h"
 #include "common/rect.h"
 #include "graphics/surface.h"
+#include "common/ptr.h"
+#ifdef USE_OPENGL_SHADERS
 #include "graphics/opengl/shader.h"
+#endif
+#ifdef USE_METAL
+#include "graphics/metal/renderer.h"
+#endif
 #include "math/vector2d.h"
 #include "math/matrix4.h"
 
 namespace Twp {
+
+enum PrimitiveType {
+	kPrimitiveLines = 0x0001,
+	kPrimitiveLineLoop = 0x0002,
+	kPrimitiveLineStrip = 0x0003,
+	kPrimitiveTriangles = 0x0004,
+	kPrimitiveTriangleStrip = 0x0005,
+	kPrimitiveTriangleFan = 0x0006
+};
+
+#ifdef USE_METAL
+struct MetalShaderState;
+#endif
 
 struct Color {
 	union {
@@ -106,11 +126,19 @@ public:
 	void load(const Graphics::Surface &surface);
 	static void bind(const Texture *texture);
 	void capture(Common::Array<byte> &data);
+#ifdef USE_METAL
+	Graphics::Metal::Texture *metalTexture() const { return _metalTarget ? &_metalTarget->texture() : _metalTexture.get(); }
+	Graphics::Metal::RenderTarget *metalTarget() const { return _metalTarget.get(); }
+#endif
 
 public:
 	uint id = 0;
 	int width = 0, height = 0;
 	uint fbo = 0;
+#ifdef USE_METAL
+	Common::SharedPtr<Graphics::Metal::Texture> _metalTexture;
+	Common::SharedPtr<Graphics::Metal::RenderTarget> _metalTarget;
+#endif
 };
 
 class RenderTexture : public Texture {
@@ -150,10 +178,18 @@ public:
 	virtual int getNumTextures() { return 0; };
 	virtual int getTexture(int index) { return 0; };
 	virtual int getTextureLoc(int index) { return 0; };
+	virtual Texture *getTextureObject(int index) { return nullptr; }
 
 private:
 	Common::HashMap<int, TextureSlot> _textures;
+#ifdef USE_OPENGL_SHADERS
 	OpenGL::Shader _shader;
+#endif
+#ifdef USE_METAL
+	Common::SharedPtr<MetalShaderState> _metalShader;
+	void initMetal(const char *name, const char *fragment);
+	void setMetalUniform(const char *name, const float *values, size_t count, uint components);
+#endif
 };
 
 typedef Common::HashMap<int, TextureSlot> Textures;
@@ -187,6 +223,10 @@ public:
 private:
 	Math::Matrix4 getFinalTransform(const Math::Matrix4 &trsf);
 	void noTexture();
+#ifdef USE_METAL
+	void drawMetal(uint32 primitive, Vertex *vertices, int count, uint32 *indices, int indexCount,
+	               const Math::Matrix4 &transform, Texture *texture);
+#endif
 
 private:
 	Texture _emptyTexture;

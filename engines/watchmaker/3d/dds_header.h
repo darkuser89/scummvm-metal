@@ -24,6 +24,9 @@
 
 #include "common/ptr.h"
 #include "common/stream.h"
+#ifdef USE_METAL
+#include "graphics/metal/renderer.h"
+#endif
 
 namespace Watchmaker {
 
@@ -52,6 +55,9 @@ public:
 	virtual ~Texture() {}
 	virtual void assignData(const TextureData &data) = 0;
 	virtual void bind() = 0;
+#ifdef USE_METAL
+	virtual Graphics::Metal::Texture *metalTexture() const { return nullptr; }
+#endif
 };
 
 

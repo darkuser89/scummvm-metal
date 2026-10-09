@@ -333,7 +333,7 @@ bool Rebel2PSX::loadLevel1Assets(RA2PSXModel &enemy, RA2PSXModel &ship,
 }
 
 Common::Error Rebel2PSX::runGame() {
-#ifdef USE_TINYGL
+#if defined(USE_METAL) || defined(USE_TINYGL)
 	RA2PSXMainMenuUI menu;
 	RA2PSXMovieText movieText;
 	_settings.load();
@@ -418,7 +418,7 @@ Common::Error Rebel2PSX::runGame() {
 	}
 #else
 	return Common::Error(Common::kUnsupportedGameidError,
-			_s("Rebel Assault II PlayStation support requires TinyGL"));
+			_s("Rebel Assault II PlayStation support requires Metal or TinyGL"));
 #endif
 }
 

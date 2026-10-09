@@ -21,7 +21,7 @@
 
 #include "watchmaker/game.h"
 
-#if defined(USE_OPENGL_GAME)
+#if defined(USE_OPENGL_GAME) || defined(USE_METAL)
 
 #include "graphics/pixelformat.h"
 #include "watchmaker/3d/render/opengl_2d.h"
@@ -35,7 +35,12 @@
 #include "watchmaker/utils.h"
 #include "watchmaker/work_dirs.h"
 
+#ifdef USE_OPENGL_GAME
 #include "graphics/opengl/system_headers.h"
+#endif
+#ifdef USE_METAL
+#include "watchmaker/3d/render/metal.h"
+#endif
 
 namespace Watchmaker {
 
@@ -142,6 +147,13 @@ bool gClipToBlitterViewport(int *sposx, int *sposy, int *sdimx, int *sdimy,
 }
 
 void renderTexture(WGame &game, gTexture &bitmap, Common::Rect srcRect, Common::Rect dstRect) {
+#ifdef USE_METAL
+	if (usingMetal()) {
+		Common::Rect viewport = game._renderer->_viewport;
+		renderMetalTexture(bitmap, srcRect, dstRect, viewport.width(), viewport.height()); return;
+	}
+#endif
+#ifdef USE_OPENGL_GAME
 	checkGlError("Entering renderTexture");
 	glClearColor(0, 0, 1, 0);
 	glEnable(GL_TEXTURE_2D);
@@ -184,6 +196,10 @@ void renderTexture(WGame &game, gTexture &bitmap, Common::Rect srcRect, Common::
 	glEnd();
 	glFlush();
 	checkGlError("Exiting renderTexture");
+
+#else
+
+#endif
 }
 
 void gTexture::render(WGame &game, Common::Rect src, Common::Rect dst) {
@@ -223,7 +239,12 @@ void rBlitter(WGame &game, int dst, int src, int dposx, int dposy,
 
 	checkGlError("rBlitter Start");
 
-	glEnable(GL_TEXTURE_2D);
+#ifdef USE_OPENGL_GAME
+#ifdef USE_METAL
+	if (!usingMetal())
+#endif
+		glEnable(GL_TEXTURE_2D);
+#endif
 	int dwWidth, dwHeight;
 
 	dwWidth = game._renderer->_viewport.width();
@@ -335,7 +356,7 @@ int rLoadBitmapImage(WGame &game, const char *TextName, unsigned char flags) {
 	Texture->Flags = CurLoaderFlags;
 	auto surface = ReadTgaImage(TextName, *stream, RGBA32, Texture->Flags);
 	applyColorKey(*surface, 0, 0, 0, false);
-	auto texData = createTextureFromSurface(*surface, GL_RGBA);
+	auto texData = createTextureFromSurface(*surface, 0);
 	Texture->_texture = createGLTexture();
 	Texture->_texture->assignData(*texData);
 	Texture->name = TextName;

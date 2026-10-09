@@ -893,7 +893,9 @@ bool SdlEventSource::dispatchSDLEvent(SDL_Event &ev, Common::Event &event) {
 
 bool SdlEventSource::handleKeyDown(SDL_Event &ev, Common::Event &event) {
 
-	SDLModToOSystemKeyFlags(SDL_GetModState(), event);
+	// Pumping SDL events may already have processed a modifier release that
+	// follows this key. Preserve the modifiers belonging to this event.
+	SDLModToOSystemKeyFlags((SDL_Keymod)ev.key.keysym.mod, event);
 
 	SDL_Keycode sdlKeycode = obtainKeycode(ev.key.keysym);
 	Common::KeyCode key = SDLToOSystemKeycode(sdlKeycode);
@@ -931,7 +933,7 @@ bool SdlEventSource::handleKeyUp(SDL_Event &ev, Common::Event &event) {
 	if (remapKey(ev, event))
 		return true;
 
-	SDLModToOSystemKeyFlags(SDL_GetModState(), event);
+	SDLModToOSystemKeyFlags((SDL_Keymod)ev.key.keysym.mod, event);
 
 	SDL_Keycode sdlKeycode = obtainKeycode(ev.key.keysym);
 

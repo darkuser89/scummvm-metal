@@ -182,6 +182,7 @@ public:
 	Common::String generateRecordFileName(const Common::String &target);
 
 	Common::SaveFileManager *getSaveManager(Common::SaveFileManager *realSaveManager);
+	Common::SaveFileManager *getRealSaveManager() const { return _realSaveManager; }
 	SDL_Surface *getSurface(int width, int height);
 	void RegisterEventSource();
 
@@ -265,6 +266,7 @@ private:
 	bool _needRedraw;
 	bool _processingMillis;
 	bool _playbackQuitPosted;
+	bool _playbackQuitPending;
 };
 
 } // End of namespace GUI

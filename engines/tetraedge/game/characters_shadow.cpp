@@ -20,6 +20,9 @@
  */
 
 #include "tetraedge/tetraedge.h"
+#ifdef USE_METAL
+#include "tetraedge/game/characters_shadow_metal.h"
+#endif
 #include "tetraedge/game/character.h"
 #include "tetraedge/game/characters_shadow.h"
 #include "tetraedge/game/characters_shadow_opengl.h"
@@ -86,6 +89,11 @@ void CharactersShadow::destroy() {
 /*static*/
 CharactersShadow *CharactersShadow::makeInstance() {
 	Graphics::RendererType r = g_engine->preferredRendererType();
+
+#ifdef USE_METAL
+	if (r == Graphics::kRendererTypeMetal)
+		return new CharactersShadowMetal();
+#endif
 
 #if defined(USE_OPENGL_GAME)
 	if (r == Graphics::kRendererTypeOpenGL)

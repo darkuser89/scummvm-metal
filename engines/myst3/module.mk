@@ -28,6 +28,10 @@ MODULE_OBJS := \
 	subtitles.o \
 	transition.o
 
+ifdef USE_METAL
+MODULE_OBJS += gfx_metal.o
+endif
+
 ifdef USE_TINYGL
 MODULE_OBJS += \
 	gfx_tinygl.o \

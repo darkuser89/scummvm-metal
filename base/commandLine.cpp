@@ -200,7 +200,7 @@ static const char HELP_STRING4[] =
 	"  --show-fps               Set the turn on display FPS info in 3D games\n"
 	"  --no-show-fps            Set the turn off display FPS info in 3D games\n"
 	"  --random-seed=SEED       Set the random seed used to initialize entropy\n"
-	"  --renderer=RENDERER      Select 3D renderer (software, opengl, opengl_shaders)\n"
+	"  --renderer=RENDERER      Select 3D renderer (software, metal, opengl, opengl_shaders)\n"
 	"  --antialiasing=SAMPLES   Select the antialiasing level\n"
 	"  --aspect-ratio           Enable aspect ratio correction\n"
 	"  --[no-]dirtyrects        Enable dirty rectangles optimisation in software renderer\n"

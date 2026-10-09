@@ -48,6 +48,9 @@
 #include "backends/mutex/sdl/sdl-mutex.h"
 #include "backends/timer/sdl/sdl-timer.h"
 #include "backends/graphics/surfacesdl/surfacesdl-graphics.h"
+#ifdef USE_METAL
+#include "backends/graphics/metalsdl/metalsdl-graphics.h"
+#endif
 #ifdef USE_OPENGL
 #include "backends/graphics/openglsdl/openglsdl-graphics.h"
 #endif
@@ -132,6 +135,10 @@ OSystem_SDL::~OSystem_SDL() {
 	}
 	delete _graphicsManager;
 	_graphicsManager = nullptr;
+#ifdef USE_METAL
+	delete _metalRenderer;
+	_metalRenderer = nullptr;
+#endif
 	delete _window;
 	_window = nullptr;
 	delete _eventManager;
@@ -228,6 +235,9 @@ bool OSystem_SDL::hasFeature(Feature f) {
 	 * we are at one initGraphics3d call of supporting OpenGL */
 	if (f == kFeatureOpenGLForGame) return _oglType != OpenGL::kContextNone && OpenGLContext.type != OpenGL::kContextGLES;
 	if (f == kFeatureShadersForGame) return _supportsShaders;
+#endif
+#ifdef USE_METAL
+	if (f == kFeatureMetalForGame) return Graphics::Metal::Renderer::isSupported();
 #endif
 #if defined(USE_SCUMMVMDLC)
 	if (f == kFeatureDLC) return true;
@@ -667,9 +677,23 @@ void OSystem_SDL::setWindowCaption(const Common::U32String &caption) {
 	_window->setWindowCaption(cap);
 }
 
-#if defined(USE_OPENGL_GAME) || defined(USE_OPENGL_SHADERS)
+#ifdef USE_METAL
+Graphics::Metal::Renderer *OSystem_SDL::getMetalRenderer() const {
+	return _graphicsManager->getMetalRenderer();
+}
+#endif
+
+#if defined(USE_OPENGL_GAME) || defined(USE_OPENGL_SHADERS) || defined(USE_METAL)
 Common::Array<uint> OSystem_SDL::getSupportedAntiAliasingLevels() const {
+#ifdef USE_METAL
+	if (Graphics::Metal::Renderer::isSupported())
+		return Graphics::Metal::Renderer::supportedSampleCounts();
+#endif
+#if defined(USE_OPENGL_GAME) || defined(USE_OPENGL_SHADERS)
 	return _antiAliasLevels;
+#else
+	return Common::Array<uint>();
+#endif
 }
 #endif
 
@@ -983,6 +1007,11 @@ SdlGraphicsManager *OSystem_SDL::createGraphicsManager(SdlEventSource *sdlEventS
 		debug(1, "creating OpenGL graphics manager");
 		return new OpenGLSdlGraphicsManager(sdlEventSource, window);
 #endif
+#ifdef USE_METAL
+	case GraphicsManagerMetal:
+		if (!_metalRenderer) _metalRenderer = new Graphics::Metal::Renderer();
+		return new MetalSdlGraphicsManager(sdlEventSource, window, *_metalRenderer);
+#endif
 	default:
 		assert(0);
 		return NULL;
@@ -1009,6 +1038,9 @@ int OSystem_SDL::getDefaultGraphicsMode() const {
 
 bool OSystem_SDL::setGraphicsMode(int mode, uint flags) {
 	bool render3d = flags & OSystem::kGfxModeRender3d;
+#ifdef USE_METAL
+	bool metal = flags & OSystem::kGfxModeMetal;
+#endif
 
 	// In 3d render mode gfx mode param is ignored.
 	if (_graphicsModes.empty() && !render3d) {
@@ -1039,15 +1071,22 @@ bool OSystem_SDL::setGraphicsMode(int mode, uint flags) {
 		uint i;
 		// Make sure the requested mode supports 3D
 		for (i = 0; i < GraphicsManagerCount; ++i) {
-			if (_supports3D[i]) {
+			bool supported = _supports3D[i];
+#ifdef USE_METAL
+			if (metal)
+				supported = _supportsMetal[i];
+#endif
+			if (supported) {
 				best3DSupport = i;
 			}
 			if (!(mode >= _firstMode[i] && mode <= _lastMode[i]))
 				continue;
-			if (_supports3D[i])
+			if (supported)
 				break;
 		}
 		if (i == GraphicsManagerCount) {
+			if (best3DSupport == (uint)-1)
+				return false;
 			mode = _firstMode[best3DSupport];
 		}
 	}
@@ -1140,6 +1179,9 @@ void OSystem_SDL::setupGraphicsModes() {
 		}
 		_lastMode[i] = _graphicsModes.size() - 1;
 		_supports3D[i] = manager->hasFeature(kFeatureOpenGLForGame);
+#ifdef USE_METAL
+		_supportsMetal[i] = manager->hasFeature(kFeatureMetalForGame);
+#endif
 		delete manager;
 		assert(_defaultMode[i] != -1);
 	}

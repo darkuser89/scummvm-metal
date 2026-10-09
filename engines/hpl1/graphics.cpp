@@ -25,22 +25,27 @@
 #include "graphics/renderer.h"
 #include "graphics/surface.h"
 #include "hpl1/opengl.h"
+#include "common/system.h"
+#ifdef USE_METAL
+#include "graphics/metal/renderer.h"
+#endif
 
 namespace Hpl1 {
 
-#ifdef HPL1_USE_OPENGL
+#if defined(HPL1_USE_OPENGL) || defined(USE_METAL)
 static Graphics::RendererType getBestRendererType() {
 	Common::String renderConfig = ConfMan.get("renderer");
 	Graphics::RendererType desiredRendererType = Graphics::Renderer::parseTypeCode(renderConfig);
 	uint32 availableRendererTypes = Graphics::Renderer::getAvailableTypes();
 	// only the following renderer types are supported for now
-	availableRendererTypes &= Graphics::kRendererTypeOpenGL | Graphics::kRendererTypeOpenGLShaders | Graphics::kRendererTypeTinyGL;
+	availableRendererTypes &= Graphics::kRendererTypeOpenGL | Graphics::kRendererTypeOpenGLShaders | Graphics::kRendererTypeTinyGL | Graphics::kRendererTypeMetal;
 	return Graphics::Renderer::getBestMatchingType(
 		desiredRendererType, availableRendererTypes);
 }
 #endif
 
 bool areShadersAvailable() {
+	if (useMetal()) return true;
 #ifdef HPL1_USE_OPENGL
 	return getBestRendererType() == Graphics::kRendererTypeOpenGLShaders;
 #else
@@ -49,6 +54,14 @@ bool areShadersAvailable() {
 }
 
 Common::ScopedPtr<Graphics::Surface> createViewportScreenshot() {
+#ifdef USE_METAL
+	if (g_system->getMetalRenderer()) {
+		Graphics::Metal::Renderer &renderer = *g_system->getMetalRenderer();
+		Common::ScopedPtr<Graphics::Surface> surface(new Graphics::Surface());
+		if (renderer.readPixels(*surface, renderer.viewport())) return surface;
+		return nullptr;
+	}
+#endif
 #ifdef HPL1_USE_OPENGL
 	return createGLViewportScreenshot();
 #else
@@ -61,6 +74,14 @@ bool useOpenGL() {
 	Graphics::RendererType bestRendererType = getBestRendererType();
 	return bestRendererType == Graphics::kRendererTypeOpenGL ||
 	       bestRendererType == Graphics::kRendererTypeOpenGLShaders;
+#else
+	return false;
+#endif
+}
+
+bool useMetal() {
+#ifdef USE_METAL
+	return getBestRendererType() == Graphics::kRendererTypeMetal;
 #else
 	return false;
 #endif

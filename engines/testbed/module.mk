@@ -39,9 +39,13 @@ MODULE_OBJS += \
 endif
 
 ifdef USE_TINYGL
+ifdef USE_METAL
+MODULE_OBJS += tinygl_metal.o
+else
 ifdef USE_OPENGL_GAME # Currently only direct comparisons are implemented
 MODULE_OBJS += \
     tinygl.o
+endif
 endif
 endif
 

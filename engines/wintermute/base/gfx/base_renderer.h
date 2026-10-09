@@ -198,6 +198,7 @@ class BaseRenderer3D;
 
 BaseRenderer3D *makeOpenGL3DRenderer(BaseGame *inGame);
 BaseRenderer3D *makeOpenGL3DShaderRenderer(BaseGame *inGame);
+BaseRenderer3D *makeMetal3DRenderer(BaseGame *inGame);
 BaseRenderer3D *makeTinyGL3DRenderer(BaseGame *inGame);
 #endif
 

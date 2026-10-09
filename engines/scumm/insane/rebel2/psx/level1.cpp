@@ -37,7 +37,7 @@
 
 namespace Scumm {
 
-#ifdef USE_TINYGL
+#if defined(USE_METAL) || defined(USE_TINYGL)
 const int kLevel1FrameRate = 30;
 
 enum {
@@ -421,7 +421,7 @@ void updateLevel1Explosions(RA2PSXLevel1Explosion *explosions, int frameCount) {
 	}
 }
 
-void renderLevel1Explosions(RA2PSXTinyGLRenderer &renderer,
+void renderLevel1Explosions(RA2PSXRenderer &renderer,
 		const Common::Array<RA2PSXTexture> &frames, const RA2PSXLevel1Explosion *explosions) {
 	for (int i = 0; i < kLevel1ExplosionSlots; ++i) {
 		const RA2PSXLevel1Explosion &explosion = explosions[i];
@@ -555,7 +555,7 @@ void updateLevel1Puffs(RA2PSXLevel1Puff *puffs) {
 	}
 }
 
-void renderLevel1Puffs(RA2PSXTinyGLRenderer &renderer, const RA2PSXTexture &texture,
+void renderLevel1Puffs(RA2PSXRenderer &renderer, const RA2PSXTexture &texture,
 		const RA2PSXLevel1Puff *puffs) {
 	if (texture.pixels.empty())
 		return;
@@ -588,7 +588,7 @@ void updateLevel1Debris(RA2PSXLevel1Debris *debris, RA2PSXLevel1Puff *puffs,
 	}
 }
 
-void renderLevel1Debris(RA2PSXTinyGLRenderer &renderer,
+void renderLevel1Debris(RA2PSXRenderer &renderer,
 		const Common::Array<RA2PSXModel> &models, const RA2PSXLevel1Debris *debris) {
 	if (models.empty())
 		return;
@@ -873,7 +873,7 @@ bool updateLevel1TieShot(RA2PSXLevel1TieShot &shot, bool outsideView,
 	return position[2] > 200;
 }
 
-void renderLevel1TieShots(RA2PSXTinyGLRenderer &renderer, const RA2PSXModel &bolt,
+void renderLevel1TieShots(RA2PSXRenderer &renderer, const RA2PSXModel &bolt,
 		const RA2PSXLevel1TieShot *shots) {
 	for (int i = 0; i < kLevel1ShotCount; ++i) {
 		if (!shots[i].active)
@@ -1142,7 +1142,7 @@ bool level1ShotHitsEnemy(const RA2PSXLevel1Shot &shot, const int *position) {
 	return dx * dx + dy * dy <= (float)kLevel1HitRadius;
 }
 
-void renderLevel1Shots(RA2PSXTinyGLRenderer &renderer, const RA2PSXModel &laser,
+void renderLevel1Shots(RA2PSXRenderer &renderer, const RA2PSXModel &laser,
 		const RA2PSXLevel1Shot *shots) {
 	for (int shotIndex = 0; shotIndex < kLevel1ShotCount; ++shotIndex) {
 		const RA2PSXLevel1Shot &shot = shots[shotIndex];
@@ -1170,7 +1170,7 @@ Rebel2PSX::Level1Result Rebel2PSX::playLevel1(const RA2PSXModel &enemyModel,
 		const RA2PSXModel &laser, const RA2PSXModel &tieLaser,
 		const Common::Array<RA2PSXModel> &debrisModels, const RA2PSXLevel1UI &ui,
 		int &lives, int &score) {
-#ifndef USE_TINYGL
+#if !defined(USE_METAL) && !defined(USE_TINYGL)
 	(void)enemyModel;
 	(void)shipModel;
 	(void)crosshair;
@@ -1192,7 +1192,7 @@ Rebel2PSX::Level1Result Rebel2PSX::playLevel1(const RA2PSXModel &enemyModel,
 		return kLevel1Error;
 	}
 
-	RA2PSXTinyGLRenderer renderer;
+	RA2PSXRenderer renderer;
 	if (!renderer.init(_vm->_screenWidth, _vm->_screenHeight)) {
 		decoder.close();
 		return kLevel1Error;

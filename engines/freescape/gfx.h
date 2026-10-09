@@ -372,6 +372,7 @@ protected:
 
 Graphics::RendererType determinateRenderType();
 Renderer *CreateGfxOpenGL(int screenW, int screenH, Common::RenderMode renderMode, bool authenticGraphics);
+Renderer *CreateGfxMetal(int screenW, int screenH, Common::RenderMode renderMode, bool authenticGraphics);
 Renderer *CreateGfxOpenGLShader(int screenW, int screenH, Common::RenderMode renderMode, bool authenticGraphics);
 Renderer *CreateGfxTinyGL(int screenW, int screenH, Common::RenderMode renderMode);
 Renderer *createRenderer(int screenW, int screenH, Common::RenderMode renderMode, bool authenticGraphics);

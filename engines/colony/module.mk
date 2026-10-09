@@ -21,6 +21,10 @@ MODULE_OBJS := \
 	think.o \
 	ui.o
 
+ifdef USE_METAL
+MODULE_OBJS += renderer_metal.o
+endif
+
 MODULE_DIRS += \
 	engines/colony
 

@@ -595,6 +595,9 @@ bool BaseGame::initialize2() { // we know whether we are going to be accelerated
 	uint32 availableRendererTypes = Graphics::Renderer::getAvailableTypes();
 
 	availableRendererTypes &=
+#if defined(USE_METAL)
+			Graphics::kRendererTypeMetal |
+#endif
 #if defined(USE_OPENGL_GAME)
 			Graphics::kRendererTypeOpenGL |
 #endif
@@ -616,6 +619,12 @@ bool BaseGame::initialize2() { // we know whether we are going to be accelerated
 	Graphics::RendererType matchingRendererType = Graphics::Renderer::getBestMatchingType(desiredRendererType, availableRendererTypes);
 
 	bool force2dRenderer = _force2dRenderer && !_playing3DGame;
+#if defined(USE_METAL)
+	if (!force2dRenderer && matchingRendererType == Graphics::kRendererTypeMetal) {
+		initGraphics3d(_settingsResWidth, _settingsResHeight, true);
+		_renderer3D = makeMetal3DRenderer(this);
+	}
+#endif
 #if defined(USE_OPENGL_SHADERS)
 	if (!force2dRenderer && matchingRendererType == Graphics::kRendererTypeOpenGLShaders) {
 		initGraphics3d(_settingsResWidth, _settingsResHeight);

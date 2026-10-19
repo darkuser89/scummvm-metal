@@ -16,7 +16,7 @@ namespace Metal = Graphics::Metal;
 class MetalTexture : public ITexture {
 public:
 	MetalTexture(int32 w, int32 h, bool mipmaps, Metal::Renderer &renderer)
-		: ITexture(Common::Point(w, h)), _renderer(renderer), _mipmaps(mipmaps) {
+		: ITexture(Common::Point(w, h)), _renderer(renderer) {
 		Graphics::Surface surface;
 		surface.create(w, h, Graphics::PixelFormat::createFormatRGBA32());
 		surface.fillRect(Common::Rect(w, h), 0);
@@ -29,15 +29,12 @@ public:
 	void update(const Graphics::Surface &surface) override {
 		assert(surface.w == size().x && surface.h == size().y);
 		_renderer.updateTexture(*_texture, surface, Common::Rect(surface.w, surface.h));
-		if (_mipmaps)
-			_renderer.generateMipmaps(*_texture);
 	}
 	Metal::Texture *texture() const { return _texture; }
 
 private:
 	Metal::Renderer &_renderer;
 	Metal::Texture *_texture = nullptr;
-	bool _mipmaps;
 };
 
 class MetalRenderer : public OpenGLRendererBase, public virtual IDebugRenderer {
@@ -49,6 +46,7 @@ public:
 			error("Alcachofa: Metal renderer unavailable");
 	}
 	~MetalRenderer() override {
+		flushBatch();
 		_renderer->setRenderTarget(nullptr);
 		_renderer->flush(true);
 		delete _output;
@@ -59,6 +57,7 @@ public:
 	Graphics::PixelFormat getPixelFormat() const override { return Graphics::PixelFormat::createFormatRGBA32(); }
 	bool requiresPoTTextures() const override { return false; }
 	void begin() override {
+		flushBatch();
 		_renderer->setRenderTarget(nullptr);
 		resetState();
 		_texture = nullptr;
@@ -66,10 +65,12 @@ public:
 		setBlendMode(BlendMode::AdditiveAlpha);
 	}
 	void setTexture(ITexture *texture) override {
+		if (texture != _texture) flushBatch();
 		_texture = dynamic_cast<MetalTexture *>(texture);
 		assert(!texture || _texture);
 	}
 	void setBlendMode(BlendMode mode) override {
+		flushBatch();
 		_currentBlendMode = mode;
 		_state.blend = true;
 		_state.srcRGB = _state.srcAlpha = Metal::kBlendOne;
@@ -93,15 +94,16 @@ public:
 			break;
 		}
 	}
-	void setLodBias(float bias) override { _currentLodBias = bias; }
+	void setLodBias(float bias) override { if (bias != _currentLodBias) flushBatch(); _currentLodBias = bias; }
 	void setOutput(Graphics::Surface &surface) override {
+		flushBatch();
 		assert(_isFirstDrawCommand);
 		assert(surface.format == getPixelFormat());
 		_renderer->setRenderTarget(nullptr);
 		if (!_output || _output->texture().width() != (uint)surface.w || _output->texture().height() != (uint)surface.h) {
 			_renderer->flush(true);
 			delete _output;
-			_output = _renderer->createRenderTarget(surface.w, surface.h);
+			_output = _renderer->createRenderTarget(surface.w, surface.h, 1, Metal::kTargetBGRA8, false, false);
 			if (!_output)
 				error("Alcachofa: could not allocate Metal output target");
 		}
@@ -114,6 +116,7 @@ public:
 	}
 	void end() override {
 		firstDraw();
+		flushBatch();
 		if (_currentOutput) {
 			Graphics::Surface pixels;
 			if (_renderer->readPixels(pixels, Common::Rect(_outputSize.x, _outputSize.y))) {
@@ -139,12 +142,19 @@ public:
 			vertices[i].texcoord[1] = uv[i].getY();
 		}
 		bool mirror = texMin != Math::Vector2d() || texMax != Math::Vector2d(1, 1);
+		Metal::Wrap wrap = mirror ? Metal::kMirror : Metal::kClamp;
+		bool linear = g_engine->config().texFilter();
+		uint32 posterize = g_engine->config().bits32() ? 0 : 1;
+		if (_state.wrapS != wrap || _state.linear != linear || _uniforms.posterize != posterize || _batchVertices.size() >= 65536)
+			flushBatch();
 		_state.wrapS = _state.wrapT = mirror ? Metal::kMirror : Metal::kClamp;
-		_state.linear = g_engine->config().texFilter();
+		_state.linear = linear;
 		_uniforms.lodBias = _currentLodBias;
-		_uniforms.posterize = g_engine->config().bits32() ? 0 : 1;
+		_uniforms.posterize = posterize;
 		const uint32 indices[] = {0, 1, 2, 0, 2, 3};
-		_renderer->drawIndexed(vertices, 4, indices, 6, _texture ? _texture->texture() : nullptr, _state, _uniforms);
+		uint base = _batchVertices.size();
+		for (const Metal::Vertex &v : vertices) _batchVertices.push_back(v);
+		for (uint index : indices) _batchIndices.push_back(base + index);
 	}
 	void debugPolygon(Common::Span<Math::Vector2d> points, Color color) override {
 		firstDraw();
@@ -184,10 +194,12 @@ public:
 
 protected:
 	void setViewportInner(int x, int y, int width, int height) override {
+		flushBatch();
 		_viewport = Common::Rect(x, y, x + width, y + height);
 		_renderer->setViewport(_viewport);
 	}
 	void setMatrices(bool flipped) override {
+		flushBatch();
 		_uniforms = Metal::Uniforms();
 		_uniforms.transform[0] = 2.0f / _resolution.x;
 		_uniforms.transform[5] = (flipped ? -2.0f : 2.0f) / _resolution.y;
@@ -199,6 +211,12 @@ protected:
 	}
 
 private:
+	void flushBatch() {
+		if (_batchVertices.empty()) return;
+		_renderer->drawIndexed(_batchVertices.data(), _batchVertices.size(), _batchIndices.data(), _batchIndices.size(),
+			_texture ? _texture->texture() : nullptr, _state, _uniforms);
+		_batchVertices.clear(); _batchIndices.clear();
+	}
 	static Metal::Vertex vertex(const Math::Vector2d &p, Color c) {
 		return {{p.getX(), p.getY(), 0}, {0, 0}, {c.r / 255.0f, c.g / 255.0f, c.b / 255.0f, c.a / 255.0f}};
 	}
@@ -214,6 +232,8 @@ private:
 	Metal::DrawState _state;
 	Metal::Uniforms _uniforms;
 	Common::Rect _viewport;
+	Common::Array<Metal::Vertex> _batchVertices;
+	Common::Array<uint32> _batchIndices;
 };
 
 IRenderer *IRenderer::createMetalRenderer(Common::Point resolution) {

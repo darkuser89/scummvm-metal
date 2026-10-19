@@ -50,11 +50,39 @@ void CompiledShader::setUniform(const Common::String &name, const float *values,
 	setUniformValues(name, values, nullptr, count);
 }
 
+void CompiledShader::prepareUniformBindings() const {
+	if (_preparedUniformCount == uniforms.size()) return;
+	_uniformBindings.clear();
+	for (uint i = 0; i < uniforms.size(); ++i) {
+		const ShaderUniform &uniform = uniforms[i];
+		Common::String name = uniform.name;
+		bool special = name.hasPrefix("_scummvmValue_");
+		if (special) name.erase(0, 14);
+		UniformBinding binding; binding.index = i;
+		if (special) {
+			Common::String flagName = "_scummvmHas_", indices;
+			for (uint pos = 0; pos < name.size(); ++pos) {
+				if (name[pos] == '[') {
+					do { indices += name[pos]; } while (name[pos] != ']' && ++pos < name.size());
+				} else flagName += name[pos] == '.' ? '_' : name[pos];
+			}
+			flagName += indices;
+			for (uint flag = 0; flag < uniforms.size(); ++flag)
+				if (uniforms[flag].name == flagName && uniforms[flag].fragment == uniform.fragment) binding.flags.push_back(uniforms[flag].offset);
+		}
+		_uniformBindings[name].push_back(binding);
+		if (name.hasSuffix("[0]")) { name.erase(name.size() - 3); _uniformBindings[name].push_back(binding); }
+	}
+	_preparedUniformCount = uniforms.size();
+}
+
 void CompiledShader::setUniformValues(const Common::String &name, const float *values, const uint32 *integers, uint count) {
-	for (const auto &uniform : uniforms) {
-		Common::String bindingName = uniform.name;
-		if (bindingName.hasPrefix("_scummvmValue_")) bindingName.erase(0, 14);
-		if ((bindingName != name && bindingName != name + "[0]") || count != uniform.components * uniform.columns) continue;
+	prepareUniformBindings();
+	auto found = _uniformBindings.find(name);
+	if (found == _uniformBindings.end()) return;
+	for (const UniformBinding &binding : found->_value) {
+		const ShaderUniform &uniform = uniforms[binding.index];
+		if (count != uniform.components * uniform.columns) continue;
 		Common::Array<byte> &data = uniform.fragment ? fragmentData : vertexData;
 		for (uint column = 0; column < uniform.columns; ++column) {
 			for (uint row = 0; row < uniform.components; ++row) {
@@ -82,26 +110,16 @@ void CompiledShader::setUniformValues(const Common::String &name, const float *v
 				}
 			}
 		}
-		if (uniform.name.hasPrefix("_scummvmValue_")) {
-			Common::String flagName = "_scummvmHas_", indices;
-			for (uint pos = 0; pos < bindingName.size(); ++pos) {
-				if (bindingName[pos] == '[') {
-					do { indices += bindingName[pos]; } while (bindingName[pos] != ']' && ++pos < bindingName.size());
-				} else flagName += bindingName[pos] == '.' ? '_' : bindingName[pos];
-			}
-			flagName += indices;
-			for (const auto &flag : uniforms) {
-				if (flag.name != flagName || flag.fragment != uniform.fragment || flag.offset + 4 > data.size()) continue;
-				uint32 enabled = 1; memcpy(data.begin() + flag.offset, &enabled, 4);
-			}
+		for (uint offset : binding.flags) {
+			if (offset + 4 > data.size()) continue;
+			uint32 enabled = 1; memcpy(data.begin() + offset, &enabled, 4);
 		}
 	}
 }
 
 bool CompiledShader::hasUniform(const Common::String &name) const {
-	for (const auto &uniform : uniforms)
-		if (uniform.name == name || uniform.name == "_scummvmValue_" + name) return true;
-	return false;
+	prepareUniformBindings();
+	return _uniformBindings.contains(name);
 }
 
 namespace {
@@ -664,7 +682,7 @@ static bool compileStage(shaderc_compiler_t compiler, shaderc_compile_options_t 
 	if (success) success = spvc_context_create_compiler(context, SPVC_BACKEND_MSL, ir, SPVC_CAPTURE_MODE_TAKE_OWNERSHIP, &cross) == SPVC_SUCCESS;
 	shaderc_result_release(result);
 	if (success) success = spvc_compiler_create_compiler_options(cross, &crossOptions) == SPVC_SUCCESS;
-	if (success) success = spvc_compiler_options_set_uint(crossOptions, SPVC_COMPILER_OPTION_MSL_VERSION, SPVC_MAKE_MSL_VERSION(3, 0, 0)) == SPVC_SUCCESS &&
+	if (success) success = spvc_compiler_options_set_uint(crossOptions, SPVC_COMPILER_OPTION_MSL_VERSION, SPVC_MAKE_MSL_VERSION(4, 0, 0)) == SPVC_SUCCESS &&
 		spvc_compiler_options_set_uint(crossOptions, SPVC_COMPILER_OPTION_MSL_PLATFORM, SPVC_MSL_PLATFORM_MACOS) == SPVC_SUCCESS &&
 		spvc_compiler_options_set_bool(crossOptions, SPVC_COMPILER_OPTION_FIXUP_DEPTH_CONVENTION, SPVC_TRUE) == SPVC_SUCCESS &&
 		spvc_compiler_options_set_bool(crossOptions, SPVC_COMPILER_OPTION_FLIP_VERTEX_Y, SPVC_TRUE) == SPVC_SUCCESS &&

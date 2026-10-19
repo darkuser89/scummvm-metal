@@ -8,10 +8,16 @@
 #include "graphics/metal/renderer.h"
 #include "graphics/metal/shaders.h"
 #include "common/textconsole.h"
+#include "common/hashmap.h"
+
+#include <memory>
+#include <vector>
 
 #import <Metal/Metal.h>
 #import <MetalFX/MetalFX.h>
 #import <QuartzCore/CAMetalLayer.h>
+
+#include "graphics/metal/pipeline-cache.h"
 
 namespace Graphics {
 namespace Metal {
@@ -32,8 +38,8 @@ Uniforms::Uniforms() : alphaReference(0), alphaCompare(kAlways), textured(0), st
 
 static bool supportedDevice(id<MTLDevice> device) {
 #if defined(__arm64__) && defined(MACOSX)
-	if (@available(macOS 13.0, *)) {
-		if (!device || ![device supportsFamily:MTLGPUFamilyMetal3] || ![device supportsFamily:MTLGPUFamilyApple7])
+	if (@available(macOS 26.0, *)) {
+		if (!device || ![device supportsFamily:MTLGPUFamilyMetal4] || ![device supportsFamily:MTLGPUFamilyApple7])
 			return false;
 		const char *name = [[device name] UTF8String];
 		if (strncmp(name, "Apple M", 7) != 0 || name[7] < '1' || name[7] > '6')
@@ -63,9 +69,9 @@ uint Texture::depth() const { return [_impl->texture depth]; }
 
 struct OcclusionQuery::Impl {
 	id<MTLBuffer> buffer = nil;
-	id<MTLCommandBuffer> command = nil;
+	dispatch_group_t completion = nullptr;
 	uint passes = 0;
-	~Impl() { [buffer release]; [command release]; }
+	~Impl() { [buffer release]; if (completion) dispatch_release(completion); }
 };
 
 OcclusionQuery::~OcclusionQuery() { delete _impl; }
@@ -144,6 +150,7 @@ struct Target {
 	double clearDepth = 1;
 	uint32 clearStencil = 0;
 	bool multisamplingActive = true;
+	bool depthRequested = true;
 	bool clearColorPending = true, clearDepthPending = true, clearStencilPending = true;
 
 	~Target() {
@@ -155,14 +162,31 @@ struct Target {
 
 struct RenderTarget::Impl : Target {};
 
+struct Buffer::Impl {
+	id<MTLBuffer> buffer = nil;
+	NSUInteger offset = 0;
+	uint length = 0;
+	// An arena page cannot return to the pool while a public slice exists.
+	std::shared_ptr<byte> lease;
+	~Impl() { [buffer release]; }
+};
+
+Buffer::~Buffer() { delete _impl; }
+uint Buffer::size() const { return _impl->length; }
+
 struct Program::Impl {
 	id<MTLLibrary> library = nil;
 	id<MTLLibrary> fragmentLibrary = nil;
-	id<MTLFunction> vertex = nil, fragment = nil;
+	MTL4LibraryFunctionDescriptor *vertex = nil, *fragment = nil;
 	MTLVertexDescriptor *vertexDescriptor = nil;
 	NSMutableDictionary *pipelineCache = nil;
 	NSMutableArray *pipelineKeys = nil;
+	NSData *cacheIdentity = nil;
+	uint vertexTextureMask = 0xffff, fragmentTextureMask = 0xffff;
+	uint vertexBufferMask = 0xf, fragmentBufferMask = 0xf;
+	bool reflectionKnown = false, reflectionFallback = false;
 	~Impl() {
+		[cacheIdentity release];
 		for (id key in pipelineKeys) [pipelineCache removeObjectForKey:key];
 		[pipelineKeys release];
 		[pipelineCache release];
@@ -182,7 +206,7 @@ RenderTarget::~RenderTarget() {
 }
 
 static bool allocateTarget(id<MTLDevice> device, Target &target, uint w, uint h, uint samples,
-		TargetFormat format = kTargetBGRA8, bool mipmaps = false) {
+		TargetFormat format = kTargetBGRA8, bool mipmaps = false, bool depthStencil = true) {
 	MTLPixelFormat pixelFormat = format == kTargetRGBA16Float ? MTLPixelFormatRGBA16Float :
 		format == kTargetSRGBA8 ? MTLPixelFormatRGBA8Unorm_sRGB : MTLPixelFormatBGRA8Unorm;
 	MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pixelFormat width:w height:h mipmapped:mipmaps];
@@ -199,8 +223,8 @@ static bool allocateTarget(id<MTLDevice> device, Target &target, uint w, uint h,
 	}
 	desc.pixelFormat = MTLPixelFormatDepth32Float_Stencil8;
 	desc.usage = MTLTextureUsageRenderTarget;
-	id<MTLTexture> depth = [device newTextureWithDescriptor:desc];
-	if (!color || !depth || (samples > 1 && !msaa)) {
+	id<MTLTexture> depth = depthStencil ? [device newTextureWithDescriptor:desc] : nil;
+	if (!color || (depthStencil && !depth) || (samples > 1 && !msaa)) {
 		[color release]; [msaa release]; [depth release];
 		return false;
 	}
@@ -208,49 +232,169 @@ static bool allocateTarget(id<MTLDevice> device, Target &target, uint w, uint h,
 	[target.multisample release]; target.multisample = msaa;
 	[target.depth release]; target.depth = depth;
 	target.w = w; target.h = h; target.samples = samples;
+	target.depthRequested = depthStencil;
 	target.viewport = Common::Rect(w, h);
 	target.clearColorPending = target.clearDepthPending = target.clearStencilPending = true;
 	return true;
 }
 
+static bool allocateDepth(id<MTLDevice> device, Target &target) {
+	MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float_Stencil8
+		width:target.w height:target.h mipmapped:NO];
+	desc.storageMode = MTLStorageModePrivate; desc.usage = MTLTextureUsageRenderTarget;
+	if (target.samples > 1) { desc.textureType = MTLTextureType2DMultisample; desc.sampleCount = target.samples; }
+	target.depth = [device newTextureWithDescriptor:desc];
+	target.clearDepthPending = target.clearStencilPending = true;
+	return target.depth != nil;
+}
+
+// Pipeline entry descriptors retain their source libraries. Shader mathematics and
+// engine-facing layouts are shared with the original Metal implementation.
+static MTL4LibraryFunctionDescriptor *functionDescriptor(id<MTLLibrary> library, NSString *name) {
+	if (!library || ![library.functionNames containsObject:name]) return nil;
+	MTL4LibraryFunctionDescriptor *function = [[MTL4LibraryFunctionDescriptor alloc] init];
+	function.library = library; function.name = name;
+	return function;
+}
+
+static id<MTLLibrary> compileLibrary(id<MTL4Compiler> compiler, const char *source, NSError **failure) {
+	MTL4LibraryDescriptor *descriptor = [[[MTL4LibraryDescriptor alloc] init] autorelease];
+	descriptor.source = [NSString stringWithUTF8String:source];
+	MTLCompileOptions *options = [[[MTLCompileOptions alloc] init] autorelease];
+	options.languageVersion = MTLLanguageVersion4_0;
+	descriptor.options = options;
+	return [compiler newLibraryWithDescriptor:descriptor error:failure];
+}
+
+static MTLPrimitiveTopologyClass topology(Primitive primitive) {
+	return primitive == kPoints ? MTLPrimitiveTopologyClassPoint :
+		primitive == kLines || primitive == kLineStrip ? MTLPrimitiveTopologyClassLine : MTLPrimitiveTopologyClassTriangle;
+}
+
+static uint reflectedTextures(NSArray<id<MTLBinding>> *bindings) {
+	uint mask = 0;
+	for (id<MTLBinding> binding in bindings) {
+		if (!binding.isUsed || binding.type != MTLBindingTypeTexture) continue;
+		NSUInteger count = MAX((NSUInteger)1, ((id<MTLTextureBinding>)binding).arrayLength);
+		if (binding.index >= 16 || count > 16 - binding.index) error("Metal: shader texture binding exceeds the native interface");
+		for (NSUInteger i = 0; i < count; ++i) mask |= 1U << (binding.index + i);
+	}
+	return mask;
+}
+
+static uint reflectedBuffers(NSArray<id<MTLBinding>> *bindings) {
+	uint mask = 0;
+	for (id<MTLBinding> binding in bindings) {
+		if (!binding.isUsed || binding.type != MTLBindingTypeBuffer) continue;
+		if (binding.index >= 4) error("Metal: shader buffer binding exceeds the native interface");
+		mask |= 1U << binding.index;
+	}
+	return mask;
+}
+
+struct ArgumentBindings {
+	uint64 buffers[4] = {}, textures[16] = {}, samplers[16] = {};
+};
+
+struct ArgumentTable {
+	id<MTL4ArgumentTable> value = nil;
+	ArgumentBindings bindings;
+	~ArgumentTable() { [value release]; }
+};
+
+// Each submission owns its resources until feedback. Containers/residency sets
+// can be reused afterwards; query completion groups are fresh for every epoch.
+struct Submission {
+	id<MTL4CommandBuffer> command = nil;
+	id<MTL4CommandAllocator> allocator = nil;
+	id<MTLResidencySet> residency = nil;
+	NSMutableSet *resources = [[NSMutableSet alloc] init];
+	Common::Array<ArgumentTable *> tables;
+	Common::HashMap<uint64, Common::Array<ArgumentTable *> > bindingCache;
+	dispatch_group_t completion = nullptr;
+	void restart() {
+		if (completion) dispatch_release(completion);
+		completion = dispatch_group_create(); dispatch_group_enter(completion);
+	}
+	~Submission() {
+		for (ArgumentTable *table : tables) delete table;
+		[command release]; [allocator release]; [residency release];
+		[resources release]; if (completion) dispatch_release(completion);
+	}
+};
+
 struct Renderer::Impl {
 	id<MTLDevice> device = nil;
-	id<MTLCommandQueue> queue = nil;
+	id<MTL4CommandQueue> queue = nil;
+	id<MTL4Compiler> compiler = nil;
+	PipelineArchiveCache archiveCache;
+	NSData *builtinCacheIdentity = nil;
+	id<MTLEvent> dependencyEvent = nil;
+	uint64 dependencyValue = 0;
+	bool queueSyncPending = false;
+	NSMutableSet *pendingEvents = [[NSMutableSet alloc] init];
 	id<MTLLibrary> library = nil;
-	id<MTLFunction> vertex = nil, fragment = nil, logicFragment = nil;
+	MTL4LibraryFunctionDescriptor *vertex = nil, *fragment = nil, *logicFragment = nil;
 	CAMetalLayer *layer = nil;
 	Target screen;
 	Target *target = &screen;
 	RenderTarget *renderTarget = nullptr;
 	Texture *screenTexture = nullptr;
 	id<MTLTexture> white = nil;
-	id<MTLFXSpatialScaler> metalFX = nil;
+	id<MTL4FXSpatialScaler> metalFX = nil;
 	id<MTLTexture> metalFXInput = nil;
+	id<MTLFence> metalFXFence = nil;
 	Texture *metalFXOutput = nullptr;
 	uint metalFXWidth = 0, metalFXHeight = 0, metalFXOutputWidth = 0, metalFXOutputHeight = 0;
 	MTLPixelFormat metalFXFormat = MTLPixelFormatInvalid;
 	bool metalFXSupported = false;
 	bool metalFXCopyFailed = false;
-	id<MTLCommandBuffer> command = nil;
-	id<MTLRenderCommandEncoder> encoder = nil;
+	id<MTL4CommandBuffer> command = nil;
+	Submission *submission = nullptr;
+	ArgumentBindings vertexArguments, fragmentArguments;
+	Common::Array<Submission *> freeSubmissions;
+	Common::Array<ArgumentTable *> freeTables;
+	dispatch_group_t pending = dispatch_group_create();
+	id<MTL4RenderCommandEncoder> encoder = nil;
 	OcclusionQuery::Impl *query = nullptr;
 	NSMutableDictionary *pipelines = nil, *depthStates = nil, *samplers = nil;
+	NSCache *libraries = nil;
 	NSData *lastPipelineKey = nil, *lastDepthKey = nil;
 	NSMutableArray *freeDrawBuffers = nil, *drawBuffers = nil;
 	NSLock *drawBufferLock = nil;
 	id<MTLBuffer> drawBuffer = nil;
 	NSUInteger drawBufferOffset = 0;
+	std::shared_ptr<byte> drawBufferLease;
+	std::vector<std::shared_ptr<byte> > drawBufferLeases;
 	dispatch_semaphore_t inFlight;
 	Common::Rect viewport;
+	Statistics counters;
+	bool boundStateValid = false;
+	DrawState boundState;
+	Common::Rect boundViewport, boundScissor;
+	struct Access { MTLStages reads = 0, writes = 0; };
+	Common::HashMap<uintptr, Access> history, passAccess;
+	id<MTL4CommandEncoder> activePass = nil;
+	MTLStages waitedStages[3] = {};
+	MTLStages boundaryWaitedStages = 0;
+
+	id<MTLRenderPipelineState> boundPipeline = nil;
+	id<MTLDepthStencilState> boundDepth = nil;
+
 
 	Impl() : inFlight(dispatch_semaphore_create(3)) {
 		freeDrawBuffers = [[NSMutableArray alloc] init];
+
 		drawBufferLock = [[NSLock alloc] init];
 	}
 	~Impl() {
+		[pendingEvents release];
 		[drawBuffers release];
 		[freeDrawBuffers release];
 		[drawBufferLock release];
+		for (Submission *batch : freeSubmissions) delete batch;
+		for (ArgumentTable *table : freeTables) delete table;
+		dispatch_release(pending);
 	}
 
 	// Draws and texture uploads share an arena. Completed command buffers return
@@ -272,10 +416,15 @@ struct Renderer::Impl {
 				}
 			}
 			[drawBufferLock unlock];
-			if (!drawBuffer) drawBuffer = [device newBufferWithLength:pageLength options:MTLResourceStorageModeShared];
+			if (!drawBuffer) {
+				drawBuffer = [device newBufferWithLength:pageLength options:MTLResourceStorageModeShared];
+				++counters.uploadPages;
+			} else ++counters.uploadPageReuses;
 			if (!drawBuffer) error("Metal: could not allocate upload arena");
 			if (!drawBuffers) drawBuffers = [[NSMutableArray alloc] init];
 			[drawBuffers addObject:drawBuffer];
+			drawBufferLease = std::make_shared<byte>(0);
+			drawBufferLeases.push_back(drawBufferLease);
 			[drawBuffer release];
 			aligned = 0;
 		}
@@ -287,20 +436,187 @@ struct Renderer::Impl {
 	id<MTLBuffer> uploadDrawData(const void *data, NSUInteger length, NSUInteger &offset) {
 		id<MTLBuffer> buffer = reserveUploadData(length, offset);
 		if (length) memcpy((byte *)buffer.contents + offset, data, length);
+		counters.uploadedBytes += length;
 		return buffer;
 	}
 
 	void beginCommand() {
-		if (!command) {
-			command = [[queue commandBuffer] retain];
-			if (!command)
-				error("Metal: could not allocate command buffer");
+		if (command) return;
+		dispatch_semaphore_wait(inFlight, DISPATCH_TIME_FOREVER);
+		[drawBufferLock lock];
+		if (!freeSubmissions.empty()) { submission = freeSubmissions.back(); freeSubmissions.pop_back(); }
+		else submission = nullptr;
+		[drawBufferLock unlock];
+		if (!submission) {
+			submission = new Submission(); ++counters.submissionObjects;
+			submission->command = [device newCommandBuffer]; submission->allocator = [device newCommandAllocator];
+			MTLResidencySetDescriptor *descriptor = [[[MTLResidencySetDescriptor alloc] init] autorelease]; descriptor.initialCapacity = 128;
+			submission->residency = [device newResidencySetWithDescriptor:descriptor error:nil]; ++counters.residencySets;
+		}
+		if (!submission->command || !submission->allocator || !submission->residency) error("Metal 4: could not allocate command submission");
+		submission->restart();
+		command = submission->command;
+		[submission->resources unionSet:pendingEvents]; [pendingEvents removeAllObjects];
+		queueSyncPending = false; resetHazards();
+		[submission->allocator reset];
+		[command beginCommandBufferWithAllocator:submission->allocator];
+	}
+
+	void keep(id object) {
+		if (object) { beginCommand(); [submission->resources addObject:object]; }
+	}
+
+	void useResource(id<MTLResource> resource) {
+		if (!resource) return;
+		beginCommand();
+		if (![submission->resources containsObject:resource]) {
+			[submission->resources addObject:resource];
+			[submission->residency addAllocation:resource];
 		}
 	}
 
+	void resetHazards() {
+		history.clear(); passAccess.clear(); activePass = nil; boundaryWaitedStages = 0;
+		for (MTLStages &stages : waitedStages) stages = 0;
+	}
+
+	void orderEncoder(id<MTL4CommandEncoder> pass, MTLStages stages = MTLStageVertex | MTLStageFragment) {
+		if (!pass || activePass) error("Metal: invalid encoder dependency boundary");
+		activePass = pass; passAccess.clear();
+		for (MTLStages &waited : waitedStages) waited = 0;
+		// Keep a conservative boundary between command buffers and around
+		// opaque MetalFX work. Within a command buffer, only actual resource
+		// hazards insert producer/consumer-stage barriers.
+		MTLStages boundaryStages = stages & ~boundaryWaitedStages;
+		if (boundaryStages) {
+			// Waiting for vertex/fragment does not order an independent later
+			// blit. Every consumer stage must cross the command-buffer boundary
+			// before reading resources produced by an earlier submission.
+			[pass barrierAfterQueueStages:MTLStageAll beforeStages:boundaryStages visibilityOptions:MTL4VisibilityOptionDevice];
+			++counters.queueBarriers; boundaryWaitedStages |= boundaryStages;
+			if (boundaryStages & MTLStageVertex) waitedStages[0] = MTLStageAll;
+			if (boundaryStages & MTLStageFragment) waitedStages[1] = MTLStageAll;
+			if (boundaryStages & MTLStageBlit) waitedStages[2] = MTLStageAll;
+		}
+	}
+
+	void accessResource(id<MTLResource> resource, MTLStages stages, bool write = false) {
+		if (!resource) return;
+		useResource(resource);
+		if (!activePass) error("Metal: resource access without an encoder");
+		uintptr key = (uintptr)resource;
+		const Access &previous = history[key];
+		MTLStages dependencies = previous.writes | (write ? previous.reads : 0);
+		const MTLStages consumers[] = {MTLStageVertex, MTLStageFragment, MTLStageBlit};
+		MTLStages after = 0;
+		for (uint i = 0; i < 3; ++i) if (stages & consumers[i]) after |= dependencies & ~waitedStages[i];
+		if (after) {
+			[activePass barrierAfterQueueStages:after beforeStages:stages visibilityOptions:MTL4VisibilityOptionDevice];
+			++counters.queueBarriers;
+			for (uint i = 0; i < 3; ++i) if (stages & consumers[i]) waitedStages[i] |= after;
+		}
+		Access &current = passAccess[key];
+		if (write) current.writes |= stages; else current.reads |= stages;
+	}
+
+	void finishPass(id<MTL4CommandEncoder> pass) {
+		[pass endEncoding];
+		if (pass != activePass) return;
+		for (const auto &entry : passAccess) {
+			Access &previous = history[entry._key];
+			if (entry._value.writes) previous = entry._value;
+			else previous.reads |= entry._value.reads;
+		}
+		passAccess.clear(); activePass = nil;
+	}
+
+	id<MTL4ComputeCommandEncoder> beginCopy(id<MTLResource> source, id<MTLResource> destination = nil) {
+		endEncoder(); beginCommand();
+		id<MTL4ComputeCommandEncoder> blit = [command computeCommandEncoder];
+		if (!blit) error("Metal 4: could not begin copy pass");
+		orderEncoder(blit, MTLStageBlit);
+		accessResource(source, MTLStageBlit, destination == nil);
+		accessResource(destination, MTLStageBlit, true);
+		return blit;
+	}
+
+	ArgumentTable *argumentTable(const ArgumentBindings &bindings) {
+		beginCommand();
+		uint64 hash = 14695981039346656037ULL;
+		const byte *bytes = reinterpret_cast<const byte *>(&bindings);
+		for (uint i = 0; i < sizeof(bindings); ++i) hash = (hash ^ bytes[i]) * 1099511628211ULL;
+		auto found = submission->bindingCache.find(hash);
+		if (found != submission->bindingCache.end()) {
+			for (ArgumentTable *table : found->_value) {
+				if (!memcmp(&table->bindings, &bindings, sizeof(bindings))) {
+					++counters.argumentTableReuses;
+					return table;
+				}
+			}
+		}
+		ArgumentTable *table = nullptr;
+		[drawBufferLock lock];
+		if (!freeTables.empty()) { table = freeTables.back(); freeTables.pop_back(); }
+		[drawBufferLock unlock];
+		if (!table) {
+			table = new ArgumentTable();
+			MTL4ArgumentTableDescriptor *desc = [[[MTL4ArgumentTableDescriptor alloc] init] autorelease];
+			desc.maxBufferBindCount = 4; desc.maxTextureBindCount = 16; desc.maxSamplerStateBindCount = 16;
+			desc.initializeBindings = YES;
+			table->value = [device newArgumentTableWithDescriptor:desc error:nil]; ++counters.argumentTables;
+		}
+		if (!table->value) error("Metal 4: could not allocate argument table");
+		// Only completed tables reach the pool. Overwrite changed slots directly;
+		// absent slots are zeroed, so sparse programs cannot inherit old bindings.
+		for (uint i = 0; i < 4; ++i) if (table->bindings.buffers[i] != bindings.buffers[i]) {
+			[table->value setAddress:bindings.buffers[i] atIndex:i];
+			if (bindings.buffers[i]) ++counters.argumentTableWrites; else ++counters.argumentTableClears;
+		}
+		for (uint i = 0; i < 16; ++i) {
+			if (table->bindings.textures[i] != bindings.textures[i]) {
+				[table->value setTexture:MTLResourceID{bindings.textures[i]} atIndex:i];
+				if (bindings.textures[i]) ++counters.argumentTableWrites; else ++counters.argumentTableClears;
+			}
+			if (table->bindings.samplers[i] != bindings.samplers[i]) {
+				[table->value setSamplerState:MTLResourceID{bindings.samplers[i]} atIndex:i];
+				if (bindings.samplers[i]) ++counters.argumentTableWrites; else ++counters.argumentTableClears;
+			}
+		}
+		table->bindings = bindings;
+		submission->tables.push_back(table);
+		// Bound the lookup cache; all tables still live until submission feedback.
+		if (submission->tables.size() <= 2048) submission->bindingCache[hash].push_back(table);
+		return table;
+	}
+
+	void newBindings() {
+		vertexArguments = ArgumentBindings(); fragmentArguments = ArgumentBindings();
+	}
+	void bindBuffer(ArgumentBindings &table, id<MTLBuffer> buffer, NSUInteger offset, uint index) {
+		if (index >= 4) error("Metal: invalid argument-table buffer binding");
+		accessResource(buffer, &table == &vertexArguments ? MTLStageVertex : MTLStageFragment);
+		table.buffers[index] = buffer ? buffer.gpuAddress + offset : 0;
+	}
+	void bindBytes(ArgumentBindings &table, const void *bytes, NSUInteger length, uint index) {
+		NSUInteger offset; id<MTLBuffer> buffer = uploadDrawData(bytes, length, offset);
+		bindBuffer(table, buffer, offset, index);
+	}
+	void bindTexture(ArgumentBindings &table, id<MTLTexture> texture, id<MTLSamplerState> samplerState, uint index) {
+		if (index >= 16) error("Metal: invalid argument-table texture binding");
+		accessResource(texture, &table == &vertexArguments ? MTLStageVertex : MTLStageFragment); keep(samplerState);
+		table.textures[index] = texture.gpuResourceID._impl;
+		table.samplers[index] = samplerState.gpuResourceID._impl;
+	}
+	void bindArguments(id<MTL4RenderCommandEncoder> pass) {
+		[pass setArgumentTable:argumentTable(vertexArguments)->value atStages:MTLRenderStageVertex];
+		[pass setArgumentTable:argumentTable(fragmentArguments)->value atStages:MTLRenderStageFragment];
+	}
+	void waitIdle() { dispatch_group_wait(pending, DISPATCH_TIME_FOREVER); }
+
 	void endEncoder() {
+		boundStateValid = false;
 		if (encoder) {
-			[encoder endEncoding];
+			finishPass(encoder);
 			[encoder release];
 			encoder = nil;
 		}
@@ -320,57 +636,80 @@ struct Renderer::Impl {
 
 	void submit(bool wait) {
 		endEncoder();
-		if (!command)
-			return;
-		dispatch_semaphore_wait(inFlight, DISPATCH_TIME_FOREVER);
-		dispatch_semaphore_t semaphore = inFlight;
-		NSMutableArray *pages = drawBuffers;
-		NSMutableArray *pool = freeDrawBuffers;
+		// A terminal CPU wait must include queued event operations even if no
+		// rendering followed them. A small empty buffer supplies its feedback.
+		if (wait && queueSyncPending && !command) beginCommand();
+		if (!command) { if (wait) waitIdle(); return; }
+		Submission *batch = submission;
+		[batch->residency commit]; [command useResidencySet:batch->residency];
+		[command endCommandBuffer];
+		++counters.submissions;
+		NSMutableArray *pages = drawBuffers, *pool = freeDrawBuffers;
+		// The completion block owns the page leases independently of the next
+		// submission. Still-live public slices exclude a page from recycling.
+		const auto leases = std::make_shared<std::vector<std::shared_ptr<byte> > >(std::move(drawBufferLeases));
+		drawBufferLease.reset();
+		Impl *owner = this;
 		NSLock *poolLock = drawBufferLock;
-		[command addCompletedHandler:^(id<MTLCommandBuffer> completed) {
-			if (completed.status == MTLCommandBufferStatusError)
-				warning("Metal command failed: %s", [[completed.error localizedDescription] UTF8String]);
+		dispatch_semaphore_t semaphore = inFlight;
+		dispatch_group_t allPending = pending;
+		dispatch_group_enter(allPending);
+		MTL4CommitOptions *options = [[[MTL4CommitOptions alloc] init] autorelease];
+		[options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+			@autoreleasepool {
+			if (feedback.error) warning("Metal 4 command failed: %s", [[feedback.error localizedDescription] UTF8String]);
+			[batch->residency removeAllAllocations]; [batch->residency commit];
+			[batch->resources removeAllObjects];
 			[poolLock lock];
-			// Bound both page count and retained bytes after unusually large uploads.
 			NSUInteger poolBytes = 0;
 			for (id<MTLBuffer> page in pool) poolBytes += page.length;
+			NSUInteger pageIndex = 0;
 			for (id<MTLBuffer> page in pages) {
-				if (pool.count < 32 && page.length <= 16 * 1024 * 1024 &&
-						poolBytes + page.length <= 64 * 1024 * 1024) {
-					[pool addObject:page];
-					poolBytes += page.length;
+				bool unpinned = (*leases)[pageIndex++].use_count() == 1;
+				if (unpinned && pool.count < 32 && page.length <= 16 * 1024 * 1024 && poolBytes + page.length <= 64 * 1024 * 1024) {
+					[pool addObject:page]; poolBytes += page.length;
 				}
 			}
+			for (ArgumentTable *table : batch->tables) {
+				if (owner->freeTables.size() < 2048) owner->freeTables.push_back(table); else delete table;
+			}
+			batch->tables.clear(); batch->bindingCache.clear();
+			dispatch_group_leave(batch->completion);
+			if (owner->freeSubmissions.size() < 3) owner->freeSubmissions.push_back(batch); else delete batch;
 			[poolLock unlock];
 			dispatch_semaphore_signal(semaphore);
+			dispatch_group_leave(allPending);
+			}
 		}];
+		id<MTL4CommandBuffer> buffers[] = {command};
+		[queue commit:buffers count:1 options:options];
 		[drawBuffers release]; drawBuffers = nil;
 		drawBuffer = nil; drawBufferOffset = 0;
-		[command commit];
-		if (wait)
-			[command waitUntilCompleted];
-		[command release];
-		command = nil;
+		command = nil; submission = nullptr;
+		newBindings();
+		if (wait) waitIdle();
 	}
 
 	void beginEncoder() {
 		if (encoder)
 			return;
 		beginCommand();
-		MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+		MTL4RenderPassDescriptor *pass = [[[MTL4RenderPassDescriptor alloc] init] autorelease];
 		pass.colorAttachments[0].texture = target->samples > 1 ? target->multisample : target->color;
 		pass.colorAttachments[0].resolveTexture = target->samples > 1 ? target->color : nil;
 		pass.colorAttachments[0].loadAction = target->clearColorPending ? MTLLoadActionClear : MTLLoadActionLoad;
 		pass.colorAttachments[0].storeAction = target->samples > 1 ? MTLStoreActionStoreAndMultisampleResolve : MTLStoreActionStore;
 		pass.colorAttachments[0].clearColor = target->clearColor;
-		pass.depthAttachment.texture = target->depth;
-		pass.depthAttachment.loadAction = target->clearDepthPending ? MTLLoadActionClear : MTLLoadActionLoad;
-		pass.depthAttachment.storeAction = MTLStoreActionStore;
-		pass.depthAttachment.clearDepth = target->clearDepth;
-		pass.stencilAttachment.texture = target->depth;
-		pass.stencilAttachment.loadAction = target->clearStencilPending ? MTLLoadActionClear : MTLLoadActionLoad;
-		pass.stencilAttachment.storeAction = MTLStoreActionStore;
-		pass.stencilAttachment.clearStencil = target->clearStencil;
+		if (target->depth) {
+			pass.depthAttachment.texture = target->depth;
+			pass.depthAttachment.loadAction = target->clearDepthPending ? MTLLoadActionClear : MTLLoadActionLoad;
+			pass.depthAttachment.storeAction = MTLStoreActionStore;
+			pass.depthAttachment.clearDepth = target->clearDepth;
+			pass.stencilAttachment.texture = target->depth;
+			pass.stencilAttachment.loadAction = target->clearStencilPending ? MTLLoadActionClear : MTLLoadActionLoad;
+			pass.stencilAttachment.storeAction = MTLStoreActionStore;
+			pass.stencilAttachment.clearStencil = target->clearStencil;
+		}
 		if (target->samples > 1) {
 			MTLSamplePosition positions[8];
 			if (target->multisamplingActive)
@@ -378,42 +717,72 @@ struct Renderer::Impl {
 			else
 				for (uint i = 0; i < target->samples; ++i) positions[i] = MTLSamplePositionMake(0.5, 0.5);
 			[pass setSamplePositions:positions count:target->samples];
-			pass.depthAttachment.storeActionOptions = MTLStoreActionOptionCustomSamplePositions;
 		}
-		if (query) pass.visibilityResultBuffer = query->buffer;
+		if (query) {
+			pass.visibilityResultBuffer = query->buffer;
+			// Slots start at zero when the query begins; preserve earlier passes
+			// instead of Metal 4's default reset between render encoders.
+			pass.visibilityResultType = MTLVisibilityResultTypeAccumulate;
+		}
+		useResource(target->color); useResource(target->multisample); useResource(target->depth);
+		if (query) useResource(query->buffer);
 		encoder = [[command renderCommandEncoderWithDescriptor:pass] retain];
 		if (!encoder)
 			error("Metal: could not begin render pass");
+		orderEncoder(encoder);
+		accessResource(target->color, MTLStageFragment, true);
+		accessResource(target->multisample, MTLStageFragment, true);
+		accessResource(target->depth, MTLStageFragment, true);
+		if (query) accessResource(query->buffer, MTLStageFragment, true);
 		if (query) {
 			if (query->passes >= 512) error("Metal: too many render passes in an occlusion query");
 			[encoder setVisibilityResultMode:MTLVisibilityResultModeCounting offset:query->passes++ * sizeof(uint64)];
+			// A query may cross flush()/present(). Its completion must belong
+			// to the last submission that actually writes its result buffer.
+			if (query->completion != submission->completion) {
+				if (query->completion) dispatch_release(query->completion);
+				query->completion = submission->completion;
+				dispatch_retain(query->completion);
+			}
 		}
 		target->clearColorPending = target->clearDepthPending = target->clearStencilPending = false;
 	}
 
+	id<MTLLibrary> cachedLibrary(const char *source, NSError **failure) {
+		NSString *key = [NSString stringWithUTF8String:source];
+		id<MTLLibrary> result = [libraries objectForKey:key];
+		if (result) return [result retain];
+		result = compileLibrary(compiler, source, failure);
+		if (result) [libraries setObject:result forKey:key];
+		return result;
+	}
+
 	id<MTLRenderPipelineState> pipeline(const DrawState &state, bool presentation = false, Program::Impl *program = nullptr,
-			MTLPixelFormat colorFormat = MTLPixelFormatInvalid) {
+			MTLPixelFormat colorFormat = MTLPixelFormatInvalid, uint sampleCount = 0, bool fatal = true) {
 		if (colorFormat == MTLPixelFormatInvalid)
 			colorFormat = presentation ? MTLPixelFormatBGRA8Unorm : target->color.pixelFormat;
-		id<MTLFunction> vertexFunction = program ? program->vertex : vertex;
-		id<MTLFunction> fragmentFunction = program ? program->fragment : state.logicXor ? logicFragment : fragment;
+		MTL4LibraryFunctionDescriptor *vertexFunction = program ? program->vertex : vertex;
+		MTL4LibraryFunctionDescriptor *fragmentFunction = program ? program->fragment : state.logicXor ? logicFragment : fragment;
 		// Fixed-width keys avoid formatting pointer and state strings for every draw.
-		const uintptr values[] = {(uintptr)vertexFunction, (uintptr)fragmentFunction, (uintptr)colorFormat, presentation,
-			presentation ? 1U : target->samples, state.blend, state.srcRGB, state.dstRGB, state.srcAlpha,
-			state.dstAlpha, state.rgbOp, state.alphaOp, state.colorMask};
+		uint samples = sampleCount ? sampleCount : presentation ? 1 : target->samples;
+		bool blending = state.blend && !state.logicXor;
+		const uintptr values[] = {(uintptr)vertexFunction, (uintptr)fragmentFunction, (uintptr)colorFormat,
+			samples, blending, blending ? state.srcRGB : 0U, blending ? state.dstRGB : 0U, blending ? state.srcAlpha : 0U,
+			blending ? state.dstAlpha : 0U, blending ? state.rgbOp : 0U, blending ? state.alphaOp : 0U, state.colorMask, (uintptr)topology(state.primitive)};
 		NSData *key = reuseStateKey(lastPipelineKey, values, sizeof(values));
 		id<MTLRenderPipelineState> result = [pipelines objectForKey:key];
 		if (!result) {
-			MTLRenderPipelineDescriptor *descriptor = [[[MTLRenderPipelineDescriptor alloc] init] autorelease];
-			descriptor.vertexFunction = vertexFunction;
-			descriptor.fragmentFunction = fragmentFunction;
+			MTL4RenderPipelineDescriptor *descriptor = [[[MTL4RenderPipelineDescriptor alloc] init] autorelease];
+			MTL4PipelineOptions *options = [[[MTL4PipelineOptions alloc] init] autorelease];
+			options.shaderReflection = MTL4ShaderReflectionBindingInfo; descriptor.options = options;
+			descriptor.vertexFunctionDescriptor = vertexFunction;
+			descriptor.fragmentFunctionDescriptor = fragmentFunction;
 			descriptor.vertexDescriptor = program ? program->vertexDescriptor : nil;
-			descriptor.rasterSampleCount = presentation ? 1 : target->samples;
+			descriptor.rasterSampleCount = samples;
+			descriptor.inputPrimitiveTopology = topology(state.primitive);
 			descriptor.colorAttachments[0].pixelFormat = colorFormat;
-			descriptor.depthAttachmentPixelFormat = presentation ? MTLPixelFormatInvalid : MTLPixelFormatDepth32Float_Stencil8;
-			descriptor.stencilAttachmentPixelFormat = descriptor.depthAttachmentPixelFormat;
-			MTLRenderPipelineColorAttachmentDescriptor *blend = descriptor.colorAttachments[0];
-			blend.blendingEnabled = state.blend && !state.logicXor;
+			MTL4RenderPipelineColorAttachmentDescriptor *blend = descriptor.colorAttachments[0];
+			blend.blendingState = state.blend && !state.logicXor ? MTL4BlendStateEnabled : MTL4BlendStateDisabled;
 			blend.sourceRGBBlendFactor = blendFactor(state.srcRGB);
 			blend.destinationRGBBlendFactor = blendFactor(state.dstRGB);
 			blend.sourceAlphaBlendFactor = blendFactor(state.srcAlpha);
@@ -424,10 +793,50 @@ struct Renderer::Impl {
 				(state.colorMask & 2 ? MTLColorWriteMaskGreen : 0) | (state.colorMask & 4 ? MTLColorWriteMaskBlue : 0) |
 				(state.colorMask & 8 ? MTLColorWriteMaskAlpha : 0));
 			NSError *failure = nil;
-			result = [device newRenderPipelineStateWithDescriptor:descriptor error:&failure];
-			if (!result)
-				error("Metal pipeline: %s", [[failure localizedDescription] UTF8String]);
+			NSString *archivePath = archiveCache.path(program ? program->cacheIdentity : builtinCacheIdentity,
+				values + 2, sizeof(values) - 2 * sizeof(values[0]));
+			// logicXor selects a distinct built-in fragment function.
+			if (!program && state.logicXor) {
+				NSMutableData *logicIdentity = [NSMutableData dataWithData:builtinCacheIdentity];
+				[logicIdentity appendData:[fragmentFunction.name dataUsingEncoding:NSUTF8StringEncoding]];
+				archivePath = archiveCache.path(logicIdentity, values + 2, sizeof(values) - 2 * sizeof(values[0]));
+			}
+			result = archiveCache.load(device, archivePath, descriptor, counters);
+			if (!result) {
+				++counters.pipelineCompilations;
+				result = [compiler newRenderPipelineStateWithDescriptor:descriptor compilerTaskOptions:nil error:&failure];
+				if (result && archivePath && !archiveCache.store(device, archivePath, counters)) {
+					// A failed cache is optional. Drop its capturing compiler so a
+					// read-only/full disk cannot accumulate unflushed binary data.
+					MTL4CompilerDescriptor *plain = [[[MTL4CompilerDescriptor alloc] init] autorelease];
+					id<MTL4Compiler> replacement = [device newCompilerWithDescriptor:plain error:nil];
+					if (replacement) { [compiler release]; compiler = replacement; }
+					archiveCache.close(); ++counters.pipelineArchiveDisables;
+				}
+			}
+			if (!result) {
+				if (fatal) error("Metal pipeline: %s", [[failure localizedDescription] UTF8String]);
+				warning("Metal program interface: %s", failure ? [[failure localizedDescription] UTF8String] : "pipeline unavailable");
+				return nil;
+			}
 			[pipelines setObject:result forKey:key];
+			if (program) {
+				MTLRenderPipelineReflection *reflection = result.reflection;
+				if (!reflection) {
+					program->reflectionFallback = true; program->vertexTextureMask = program->fragmentTextureMask = 0xffff;
+					program->vertexBufferMask = program->fragmentBufferMask = 0xf;
+				} else if (!program->reflectionFallback) {
+					if (!program->reflectionKnown) {
+						program->vertexTextureMask = program->fragmentTextureMask = 0;
+						program->vertexBufferMask = program->fragmentBufferMask = 0;
+					}
+					program->vertexTextureMask |= reflectedTextures(reflection.vertexBindings);
+					program->fragmentTextureMask |= reflectedTextures(reflection.fragmentBindings);
+					program->vertexBufferMask |= reflectedBuffers(reflection.vertexBindings);
+					program->fragmentBufferMask |= reflectedBuffers(reflection.fragmentBindings);
+					program->reflectionKnown = true;
+				}
+			}
 			if (program) [program->pipelineKeys addObject:key];
 			[result release];
 		}
@@ -436,9 +845,10 @@ struct Renderer::Impl {
 
 	id<MTLDepthStencilState> depthState(const DrawState &state) {
 		const StencilState &front = state.frontStencil, &back = state.backStencil;
-		const uint32 values[] = {state.depthTest, state.depthWrite, state.depthCompare, state.stencil,
+		uint32 values[] = {state.depthTest, state.depthTest && state.depthWrite, state.depthTest ? uint32(state.depthCompare) : 0U, state.stencil,
 			front.compare, front.fail, front.depthFail, front.pass, front.readMask, front.writeMask,
 			back.compare, back.fail, back.depthFail, back.pass, back.readMask, back.writeMask};
+		if (!state.stencil) memset(values + 4, 0, sizeof(values) - 4 * sizeof(uint32));
 		NSData *key = reuseStateKey(lastDepthKey, values, sizeof(values));
 		id<MTLDepthStencilState> result = [depthStates objectForKey:key];
 		if (!result) {
@@ -460,10 +870,11 @@ struct Renderer::Impl {
 
 	id<MTLSamplerState> sampler(const DrawState &state, bool mipmaps) {
 		uint anisotropy = CLIP(state.anisotropy, 1U, 16U);
-		NSNumber *key = [NSNumber numberWithUnsignedInt:state.linear | (state.wrapS << 1) | (state.wrapT << 3) | (mipmaps << 5) | (state.mipLinear << 6) | (state.wrapR << 7) | (anisotropy << 9)];
+		NSNumber *key = [NSNumber numberWithUnsignedInt:state.linear | (state.wrapS << 1) | (state.wrapT << 3) | (mipmaps << 5) | ((mipmaps && state.mipLinear) << 6) | (state.wrapR << 7) | (anisotropy << 9)];
 		id<MTLSamplerState> result = [samplers objectForKey:key];
 		if (!result) {
 			MTLSamplerDescriptor *descriptor = [[[MTLSamplerDescriptor alloc] init] autorelease];
+			descriptor.supportArgumentBuffers = YES;
 			descriptor.minFilter = descriptor.magFilter = state.linear ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
 			descriptor.mipFilter = mipmaps ? (state.mipLinear ? MTLSamplerMipFilterLinear : MTLSamplerMipFilterNearest) : MTLSamplerMipFilterNotMipmapped;
 			descriptor.sAddressMode = wrapMode(state.wrapS);
@@ -480,37 +891,56 @@ struct Renderer::Impl {
 	}
 
 	void prepareDraw(Texture::Impl *texture, const DrawState &state, const Uniforms &uniforms,
-			Program::Impl *program = nullptr, bool bindTexture = true) {
-		beginEncoder();
-		[encoder setRenderPipelineState:pipeline(state, false, program)];
-		[encoder setDepthStencilState:depthState(state)];
-		[encoder setStencilReferenceValue:state.stencilReference];
-		[encoder setBlendColorRed:state.blendColor[0] green:state.blendColor[1] blue:state.blendColor[2] alpha:state.blendColor[3]];
-		[encoder setCullMode:state.cull ? (state.cullFront ? MTLCullModeFront : MTLCullModeBack) : MTLCullModeNone];
-		[encoder setFrontFacingWinding:state.clockwise ? MTLWindingClockwise : MTLWindingCounterClockwise];
-		[encoder setTriangleFillMode:state.wireframe ? MTLTriangleFillModeLines : MTLTriangleFillModeFill];
-		[encoder setDepthClipMode:state.depthClamp ? MTLDepthClipModeClamp : MTLDepthClipModeClip];
-		[encoder setDepthBias:state.depthBias slopeScale:state.slopeBias clamp:0];
-		MTLViewport vp = {(double)viewport.left, (double)viewport.top, (double)viewport.width(), (double)viewport.height(), state.depthNear, state.depthFar};
-		[encoder setViewport:vp];
+			Program::Impl *program = nullptr, bool bindDefaultTexture = true) {
+		// Color-only destinations can still be promoted if an engine genuinely
+		// starts using depth/stencil later. Reopen the pass with defined contents.
+		if (!target->depth && (state.depthTest || state.stencil)) {
+			endEncoder();
+			if (!allocateDepth(device, *target)) error("Metal: could not allocate depth/stencil attachment");
+		}
+		beginEncoder(); newBindings();
+		id<MTLRenderPipelineState> renderPipeline = pipeline(state, false, program);
+		id<MTLDepthStencilState> depthStencil = depthState(state);
+		keep(renderPipeline); keep(depthStencil);
+		if (!boundStateValid || boundPipeline != renderPipeline) { [encoder setRenderPipelineState:renderPipeline]; ++counters.encoderStateSetters; }
+		if (!boundStateValid || boundDepth != depthStencil) { [encoder setDepthStencilState:depthStencil]; ++counters.encoderStateSetters; }
+		if (!boundStateValid || boundState.stencilReference != state.stencilReference) { [encoder setStencilReferenceValue:state.stencilReference]; ++counters.encoderStateSetters; }
+		if (!boundStateValid || memcmp(boundState.blendColor, state.blendColor, sizeof(state.blendColor))) {
+			[encoder setBlendColorRed:state.blendColor[0] green:state.blendColor[1] blue:state.blendColor[2] alpha:state.blendColor[3]]; ++counters.encoderStateSetters;
+		}
+		if (!boundStateValid || boundState.cull != state.cull || (state.cull && boundState.cullFront != state.cullFront)) {
+			[encoder setCullMode:state.cull ? (state.cullFront ? MTLCullModeFront : MTLCullModeBack) : MTLCullModeNone]; ++counters.encoderStateSetters;
+		}
+		if (!boundStateValid || boundState.clockwise != state.clockwise) { [encoder setFrontFacingWinding:state.clockwise ? MTLWindingClockwise : MTLWindingCounterClockwise]; ++counters.encoderStateSetters; }
+		if (!boundStateValid || boundState.wireframe != state.wireframe) { [encoder setTriangleFillMode:state.wireframe ? MTLTriangleFillModeLines : MTLTriangleFillModeFill]; ++counters.encoderStateSetters; }
+		if (!boundStateValid || boundState.depthClamp != state.depthClamp) { [encoder setDepthClipMode:state.depthClamp ? MTLDepthClipModeClamp : MTLDepthClipModeClip]; ++counters.encoderStateSetters; }
+		if (!boundStateValid || boundState.depthBias != state.depthBias || boundState.slopeBias != state.slopeBias) {
+			[encoder setDepthBias:state.depthBias slopeScale:state.slopeBias clamp:0]; ++counters.encoderStateSetters;
+		}
+		if (!boundStateValid || boundViewport != viewport || boundState.depthNear != state.depthNear || boundState.depthFar != state.depthFar) {
+			MTLViewport vp = {(double)viewport.left, (double)viewport.top, (double)viewport.width(), (double)viewport.height(), state.depthNear, state.depthFar};
+			[encoder setViewport:vp]; ++counters.encoderStateSetters;
+		}
 		Common::Rect scissor(target->w, target->h);
-		if (state.scissor)
-			scissor.clip(state.scissorRect);
-		if (scissor.isEmpty())
-			return;
-		[encoder setScissorRect:MTLScissorRect{(NSUInteger)scissor.left, (NSUInteger)scissor.top,
-			(NSUInteger)scissor.width(), (NSUInteger)scissor.height()}];
+		if (state.scissor) scissor.clip(state.scissorRect);
+		if (scissor.isEmpty()) return;
+		if (!boundStateValid || boundScissor != scissor) {
+			[encoder setScissorRect:MTLScissorRect{(NSUInteger)scissor.left, (NSUInteger)scissor.top, (NSUInteger)scissor.width(), (NSUInteger)scissor.height()}]; ++counters.encoderStateSetters;
+		}
+		boundStateValid = true; boundPipeline = renderPipeline; boundDepth = depthStencil;
+		boundState = state; boundViewport = viewport; boundScissor = scissor;
 		// Custom programs bind their own uniform buffers in drawProgram().
 		if (!program) {
 			Uniforms actual = uniforms;
 			actual.textured = texture != nullptr;
 			actual.framebufferHeight = target->h;
-			[encoder setVertexBytes:&actual length:sizeof(actual) atIndex:1];
-			[encoder setFragmentBytes:&actual length:sizeof(actual) atIndex:1];
+			// Both stages reference the same immutable arena allocation.
+			NSUInteger offset; id<MTLBuffer> buffer = uploadDrawData(&actual, sizeof(actual), offset);
+			bindBuffer(vertexArguments, buffer, offset, 1);
+			bindBuffer(fragmentArguments, buffer, offset, 1);
 		}
-		if (bindTexture) {
-			[encoder setFragmentTexture:texture ? texture->texture : white atIndex:0];
-			[encoder setFragmentSamplerState:sampler(state, texture && texture->mipmaps && state.mipmaps) atIndex:0];
+		if (bindDefaultTexture) {
+			bindTexture(fragmentArguments, texture ? texture->texture : white, sampler(state, texture && texture->mipmaps && state.mipmaps), 0);
 		}
 	}
 };
@@ -580,22 +1010,26 @@ bool Renderer::attach(void *layer, Renderer *sharedDevice) {
 		_impl->layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
 		_impl->layer.framebufferOnly = false;
 		_impl->layer.opaque = true;
-		_impl->queue = [_impl->device newCommandQueue];
-		MTLCompileOptions *options = [[[MTLCompileOptions alloc] init] autorelease];
-		options.languageVersion = MTLLanguageVersion3_0;
+		_impl->queue = [_impl->device newMTL4CommandQueue];
 		NSError *failure = nil;
-		_impl->library = [_impl->device newLibraryWithSource:[NSString stringWithUTF8String:kShaderSource] options:options error:&failure];
-		if (!_impl->queue || !_impl->library) {
+		_impl->archiveCache.open(_impl->device);
+		MTL4CompilerDescriptor *compilerDesc = [[[MTL4CompilerDescriptor alloc] init] autorelease];
+		compilerDesc.pipelineDataSetSerializer = _impl->archiveCache.serializer;
+		_impl->compiler = [_impl->device newCompilerWithDescriptor:compilerDesc error:&failure];
+		_impl->builtinCacheIdentity = [PipelineArchiveCache::digest([NSData dataWithBytes:kShaderSource length:strlen(kShaderSource)]) retain];
+		_impl->library = compileLibrary(_impl->compiler, kShaderSource, &failure);
+		if (!_impl->queue || !_impl->compiler || !_impl->library) {
 			warning("Metal initialization failed: %s", failure ? [[failure localizedDescription] UTF8String] : "command queue unavailable");
 			detach();
 			return false;
 		}
-		_impl->vertex = [_impl->library newFunctionWithName:@"scummvmVertex"];
-		_impl->fragment = [_impl->library newFunctionWithName:@"scummvmFragment"];
-		_impl->logicFragment = [_impl->library newFunctionWithName:@"scummvmLogicFragment"];
+		_impl->vertex = functionDescriptor(_impl->library, @"scummvmVertex");
+		_impl->fragment = functionDescriptor(_impl->library, @"scummvmFragment");
+		_impl->logicFragment = functionDescriptor(_impl->library, @"scummvmLogicFragment");
 		_impl->pipelines = [[NSMutableDictionary alloc] init];
 		_impl->depthStates = [[NSMutableDictionary alloc] init];
 		_impl->samplers = [[NSMutableDictionary alloc] init];
+		_impl->libraries = [[NSCache alloc] init]; _impl->libraries.countLimit = 64;
 		MTLTextureDescriptor *white = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:1 height:1 mipmapped:NO];
 		white.storageMode = MTLStorageModeShared;
 		_impl->white = [_impl->device newTextureWithDescriptor:white];
@@ -603,6 +1037,7 @@ bool Renderer::attach(void *layer, Renderer *sharedDevice) {
 			detach();
 			return false;
 		}
+		debug(1, "Metal4: native command queue, allocator, argument tables, residency and compiler on %s", [[_impl->device name] UTF8String]);
 		uint32 pixel = 0xffffffff;
 		[_impl->white replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 withBytes:&pixel bytesPerRow:4];
 		return true;
@@ -613,11 +1048,6 @@ void Renderer::detachLayer() {
 	@autoreleasepool {
 		resetMetalFX();
 		_impl->submit(true);
-		if (_impl->queue) {
-			id<MTLCommandBuffer> fence = [_impl->queue commandBuffer];
-			[fence commit];
-			[fence waitUntilCompleted];
-		}
 		_impl->target = &_impl->screen;
 		_impl->renderTarget = nullptr;
 		_impl->query = nullptr;
@@ -631,11 +1061,6 @@ void Renderer::detach() {
 		resetMetalFX();
 		_impl->metalFXSupported = false;
 		_impl->submit(true);
-		if (_impl->queue) {
-			id<MTLCommandBuffer> fence = [_impl->queue commandBuffer];
-			[fence commit];
-			[fence waitUntilCompleted];
-		}
 		_impl->target = &_impl->screen;
 		_impl->renderTarget = nullptr;
 		_impl->query = nullptr;
@@ -647,6 +1072,7 @@ void Renderer::detach() {
 		[_impl->pipelines release]; _impl->pipelines = nil;
 		[_impl->depthStates release]; _impl->depthStates = nil;
 		[_impl->samplers release]; _impl->samplers = nil;
+		[_impl->libraries release]; _impl->libraries = nil;
 		[_impl->lastPipelineKey release]; _impl->lastPipelineKey = nil;
 		[_impl->lastDepthKey release]; _impl->lastDepthKey = nil;
 		[_impl->vertex release]; _impl->vertex = nil;
@@ -654,6 +1080,13 @@ void Renderer::detach() {
 		[_impl->logicFragment release]; _impl->logicFragment = nil;
 		[_impl->library release]; _impl->library = nil;
 		[_impl->queue release]; _impl->queue = nil;
+		[_impl->dependencyEvent release]; _impl->dependencyEvent = nil; _impl->dependencyValue = 0;
+		[_impl->pendingEvents removeAllObjects]; _impl->queueSyncPending = false;
+		[_impl->compiler release]; _impl->compiler = nil;
+		_impl->archiveCache.close();
+		[_impl->builtinCacheIdentity release]; _impl->builtinCacheIdentity = nil;
+		for (Submission *batch : _impl->freeSubmissions) delete batch; _impl->freeSubmissions.clear();
+		for (ArgumentTable *table : _impl->freeTables) delete table; _impl->freeTables.clear();
 		[_impl->layer release]; _impl->layer = nil;
 		[_impl->device release]; _impl->device = nil;
 		[_impl->drawBufferLock lock];
@@ -663,14 +1096,14 @@ void Renderer::detach() {
 	}
 }
 
-bool Renderer::resize(uint w, uint h, uint samples) {
+bool Renderer::resize(uint w, uint h, uint samples, bool depthStencil) {
 	@autoreleasepool {
 		if (!_impl->device || !w || !h || w > maxTextureSize() || h > maxTextureSize() || !supportsSamples(samples))
 			return false;
-		if (w == _impl->screen.w && h == _impl->screen.h && samples == _impl->screen.samples)
+		if (w == _impl->screen.w && h == _impl->screen.h && samples == _impl->screen.samples && depthStencil == _impl->screen.depthRequested)
 			return true;
 		_impl->submit(true);
-		if (!allocateTarget(_impl->device, _impl->screen, w, h, samples))
+		if (!allocateTarget(_impl->device, _impl->screen, w, h, samples, kTargetBGRA8, false, depthStencil))
 			return false;
 		if (!_impl->screenTexture) {
 			Texture::Impl *texture = new Texture::Impl;
@@ -689,12 +1122,12 @@ bool Renderer::resize(uint w, uint h, uint samples) {
 	}
 }
 
-RenderTarget *Renderer::createRenderTarget(uint w, uint h, uint samples, TargetFormat format, bool mipmaps) {
+RenderTarget *Renderer::createRenderTarget(uint w, uint h, uint samples, TargetFormat format, bool mipmaps, bool depthStencil) {
 	@autoreleasepool {
 		if (!_impl->device || !w || !h || w > maxTextureSize() || h > maxTextureSize() || !supportsSamples(samples))
 			return nullptr;
 		RenderTarget::Impl *target = new RenderTarget::Impl;
-		if (!allocateTarget(_impl->device, *target, w, h, samples, format, mipmaps)) {
+		if (!allocateTarget(_impl->device, *target, w, h, samples, format, mipmaps, depthStencil)) {
 			delete target;
 			return nullptr;
 		}
@@ -707,6 +1140,7 @@ RenderTarget *Renderer::createRenderTarget(uint w, uint h, uint samples, TargetF
 }
 
 void Renderer::setRenderTarget(RenderTarget *target) {
+	if (_impl->renderTarget == target) return;
 	if (_impl->target->color && (_impl->target->clearColorPending || _impl->target->clearDepthPending || _impl->target->clearStencilPending))
 		_impl->beginEncoder();
 	_impl->endEncoder();
@@ -725,6 +1159,7 @@ void Renderer::resetMetalFX() {
 			flush(true);
 		[_impl->metalFX release]; _impl->metalFX = nil;
 		[_impl->metalFXInput release]; _impl->metalFXInput = nil;
+		[_impl->metalFXFence release]; _impl->metalFXFence = nil;
 		delete _impl->metalFXOutput; _impl->metalFXOutput = nullptr;
 		_impl->metalFXWidth = _impl->metalFXHeight = 0;
 		_impl->metalFXOutputWidth = _impl->metalFXOutputHeight = 0;
@@ -761,8 +1196,11 @@ Texture *Renderer::upscaleMetalFX(Texture &source, uint width, uint height) {
 			// Legacy engines supply display-encoded SDR values in unorm textures.
 			// Linear processing here would apply the wrong transfer function.
 			desc.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
-			_impl->metalFX = [desc newSpatialScalerWithDevice:_impl->device];
+			_impl->metalFX = [desc newSpatialScalerWithDevice:_impl->device compiler:_impl->compiler];
 			if (_impl->metalFX) {
+				_impl->metalFXFence = [_impl->device newFence];
+				if (!_impl->metalFXFence) { [_impl->metalFX release]; _impl->metalFX = nil; return nullptr; }
+				_impl->metalFX.fence = _impl->metalFXFence;
 				MTLTextureDescriptor *output = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:
 					MTLPixelFormatBGRA8Unorm width:width height:height mipmapped:NO];
 				output.storageMode = MTLStorageModePrivate;
@@ -813,18 +1251,29 @@ Texture *Renderer::upscaleMetalFX(Texture &source, uint width, uint height) {
 					return nullptr;
 				}
 			}
-			id<MTLBlitCommandEncoder> blit = [_impl->command blitCommandEncoder];
+			id<MTL4ComputeCommandEncoder> blit = _impl->beginCopy(input, _impl->metalFXInput);
 			[blit copyFromTexture:input sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0)
 				sourceSize:MTLSizeMake(input.width, input.height, 1) toTexture:_impl->metalFXInput
 				destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
-			[blit endEncoding];
+			_impl->finishPass(blit);
 			input = _impl->metalFXInput;
 		}
 		_impl->metalFX.colorTexture = input;
 		_impl->metalFX.outputTexture = _impl->metalFXOutput->_impl->texture;
 		_impl->metalFX.inputContentWidth = input.width;
 		_impl->metalFX.inputContentHeight = input.height;
+		_impl->useResource(input); _impl->useResource(_impl->metalFXOutput->_impl->texture);
+		_impl->keep(_impl->metalFX);
+		_impl->keep(_impl->metalFXFence);
+		id<MTL4ComputeCommandEncoder> before = _impl->beginCopy(input, _impl->metalFXOutput->_impl->texture);
+		[before barrierAfterQueueStages:MTLStageAll beforeStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
+		++_impl->counters.queueBarriers;
+		[before updateFence:_impl->metalFXFence afterEncoderStages:MTLStageDispatch | MTLStageBlit]; _impl->finishPass(before);
 		[_impl->metalFX encodeToCommandBuffer:_impl->command];
+		id<MTL4ComputeCommandEncoder> after = [_impl->command computeCommandEncoder];
+		[after waitForFence:_impl->metalFXFence beforeEncoderStages:MTLStageDispatch | MTLStageBlit];
+		[after barrierAfterStages:MTLStageDispatch | MTLStageBlit beforeQueueStages:MTLStageAll visibilityOptions:MTL4VisibilityOptionDevice];
+		_impl->finishPass(after); _impl->resetHazards();
 		_impl->metalFX.colorTexture = nil;
 		_impl->metalFX.outputTexture = nil;
 		return _impl->metalFXOutput;
@@ -838,11 +1287,27 @@ uint Renderer::sampleCount() const { return _impl->target->samples; }
 uint Renderer::maxTextureSize() const { return _impl->device ? 16384 : 0; }
 bool Renderer::supportsSamples(uint count) const { return _impl->device && [_impl->device supportsTextureSampleCount:count]; }
 
+static PixelFormat rgb565() { return PixelFormat(2, 5, 6, 5, 0, 11, 5, 0, 0); }
+static MTLPixelFormat nativeTextureFormat(const PixelFormat *format) {
+	if (format && *format == rgb565()) return MTLPixelFormatB5G6R5Unorm;
+	if (format && *format == PixelFormat::createFormatBGRA32()) return MTLPixelFormatBGRA8Unorm;
+	return MTLPixelFormatRGBA8Unorm;
+}
+static bool compressedFormat(MTLPixelFormat format) {
+	return format == MTLPixelFormatBC1_RGBA || format == MTLPixelFormatBC2_RGBA || format == MTLPixelFormatBC3_RGBA;
+}
+
 Texture *Renderer::createTexture(const Surface &surface, bool mipmaps, uint mipLevels) {
+	Texture *texture = allocateTexture(surface.w, surface.h, mipmaps, mipLevels, &surface.format);
+	if (texture) updateTexture(*texture, surface, Common::Rect(surface.w, surface.h));
+	return texture;
+}
+
+Texture *Renderer::allocateTexture(uint width, uint height, bool mipmaps, uint mipLevels, const PixelFormat *format) {
 	@autoreleasepool {
-		if (!_impl->device || surface.w <= 0 || surface.h <= 0 || uint(surface.w) > maxTextureSize() || uint(surface.h) > maxTextureSize())
+		if (!_impl->device || !width || !height || width > maxTextureSize() || height > maxTextureSize())
 			return nullptr;
-		MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:surface.w height:surface.h mipmapped:mipmaps];
+		MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:nativeTextureFormat(format) width:width height:height mipmapped:mipmaps];
 		if (mipLevels) {
 			if (mipLevels > desc.mipmapLevelCount)
 				return nullptr;
@@ -857,9 +1322,32 @@ Texture *Renderer::createTexture(const Surface &surface, bool mipmaps, uint mipL
 			delete impl;
 			return nullptr;
 		}
-		Texture *texture = new Texture(impl);
-		updateTexture(*texture, surface, Common::Rect(surface.w, surface.h));
-		return texture;
+		return new Texture(impl);
+	}
+}
+
+Texture *Renderer::createCompressedTexture(const void *data, uint bytes, uint width, uint height, CompressedFormat format) {
+	@autoreleasepool {
+		if (!_impl->device || !_impl->device.supportsBCTextureCompression || !data || !width || !height ||
+		    width > maxTextureSize() || height > maxTextureSize() || format > kBC3) return nullptr;
+		uint blockBytes = format == kBC1 ? 8 : 16;
+		uint rowBytes = ((width + 3) / 4) * blockBytes, rows = (height + 3) / 4;
+		if (uint64(rowBytes) * rows > bytes) return nullptr;
+		MTLPixelFormat pixelFormat = format == kBC1 ? MTLPixelFormatBC1_RGBA : format == kBC2 ? MTLPixelFormatBC2_RGBA : MTLPixelFormatBC3_RGBA;
+		MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pixelFormat width:width height:height mipmapped:NO];
+		desc.storageMode = MTLStorageModePrivate; desc.usage = MTLTextureUsageShaderRead;
+		Texture::Impl *impl = new Texture::Impl; impl->mipmaps = false;
+		impl->texture = [_impl->device newTextureWithDescriptor:desc];
+		if (!impl->texture) { delete impl; return nullptr; }
+		uint pitch = (rowBytes + 255) & ~255U;
+		NSUInteger offset; id<MTLBuffer> staging = _impl->reserveUploadData(uint64(pitch) * rows, offset);
+		for (uint row = 0; row < rows; ++row)
+			memcpy((byte *)staging.contents + offset + row * pitch, (const byte *)data + row * rowBytes, rowBytes);
+		id<MTL4ComputeCommandEncoder> copy = _impl->beginCopy(staging, impl->texture);
+		[copy copyFromBuffer:staging sourceOffset:offset sourceBytesPerRow:pitch sourceBytesPerImage:uint64(pitch) * rows
+			sourceSize:MTLSizeMake(width,height,1) toTexture:impl->texture destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0,0,0)];
+		_impl->finishPass(copy);
+		return new Texture(impl);
 	}
 }
 
@@ -895,12 +1383,11 @@ void Renderer::updateIndexTexture(Texture &texture, const Surface &surface, cons
 		id<MTLBuffer> staging = _impl->reserveUploadData((NSUInteger)pitch * area.height(), offset);
 		for (int y = 0; y < area.height(); ++y)
 			memcpy((byte *)staging.contents + offset + y * pitch, surface.getBasePtr(area.left, area.top + y), area.width());
-		_impl->endEncoder(); _impl->beginCommand();
-		id<MTLBlitCommandEncoder> blit = [_impl->command blitCommandEncoder];
+		id<MTL4ComputeCommandEncoder> blit = _impl->beginCopy(staging, texture._impl->texture);
 		[blit copyFromBuffer:staging sourceOffset:offset sourceBytesPerRow:pitch sourceBytesPerImage:(NSUInteger)pitch * area.height()
 			sourceSize:MTLSizeMake(area.width(), area.height(), 1) toTexture:texture._impl->texture destinationSlice:0
 			destinationLevel:0 destinationOrigin:MTLOriginMake(area.left, area.top, 0)];
-		[blit endEncoding];
+		_impl->finishPass(blit);
 	}
 }
 
@@ -943,11 +1430,10 @@ Texture *Renderer::createVolumeTexture(const void *rgba, uint bytes, uint w, uin
 		id<MTLBuffer> staging = _impl->reserveUploadData(imageBytes * d, offset);
 		for (uint z = 0; z < d; ++z) for (uint y = 0; y < h; ++y)
 			memcpy((byte *)staging.contents + offset + z * imageBytes + y * pitch, (const byte *)rgba + ((NSUInteger)z * h + y) * w * 4, w * 4);
-		_impl->endEncoder(); _impl->beginCommand();
-		id<MTLBlitCommandEncoder> blit = [_impl->command blitCommandEncoder];
+		id<MTL4ComputeCommandEncoder> blit = _impl->beginCopy(staging, impl->texture);
 		[blit copyFromBuffer:staging sourceOffset:offset sourceBytesPerRow:pitch sourceBytesPerImage:imageBytes
 			sourceSize:MTLSizeMake(w, h, d) toTexture:impl->texture destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
-		[blit endEncoding];
+		_impl->finishPass(blit);
 		Texture *texture = new Texture(impl);
 		if (mipmaps) generateMipmaps(*texture);
 		return texture;
@@ -966,8 +1452,11 @@ OcclusionQuery *Renderer::createOcclusionQuery() {
 void Renderer::beginOcclusionQuery(OcclusionQuery &query) {
 	@autoreleasepool {
 		if (_impl->query) error("Metal: overlapping occlusion queries");
-		if (query._impl->command) [query._impl->command waitUntilCompleted];
-		[query._impl->command release]; query._impl->command = nil;
+		if (query._impl->completion) {
+			if (_impl->submission && _impl->submission->completion == query._impl->completion) _impl->submit(false);
+			dispatch_group_wait(query._impl->completion, DISPATCH_TIME_FOREVER);
+			dispatch_release(query._impl->completion); query._impl->completion = nullptr;
+		}
 		memset(query._impl->buffer.contents, 0, query._impl->buffer.length);
 		query._impl->passes = 0;
 		_impl->endEncoder();
@@ -979,21 +1468,26 @@ void Renderer::endOcclusionQuery(OcclusionQuery &query) {
 	@autoreleasepool {
 		if (_impl->query != query._impl) error("Metal: ending an inactive occlusion query");
 		_impl->endEncoder();
-		_impl->beginCommand();
-		query._impl->command = [_impl->command retain];
+		if (!query._impl->completion) {
+			_impl->beginCommand();
+			query._impl->completion = _impl->submission->completion;
+			dispatch_retain(query._impl->completion);
+		}
 		_impl->query = nullptr;
-		_impl->submit(false);
 	}
 }
 
 bool Renderer::occlusionQueryReady(const OcclusionQuery &query) const {
-	return query._impl->command && query._impl->command.status >= MTLCommandBufferStatusCompleted;
+	// Polling requests progress, but ending several queries can share one batch.
+	if (_impl->submission && _impl->submission->completion == query._impl->completion) _impl->submit(false);
+	return query._impl->completion && dispatch_group_wait(query._impl->completion, DISPATCH_TIME_NOW) == 0;
 }
 
 uint64 Renderer::occlusionQueryResult(OcclusionQuery &query, bool wait) {
 	if (_impl->query == query._impl) error("Metal: reading an active occlusion query");
-	if (!query._impl->command) return 0;
-	if (wait) [query._impl->command waitUntilCompleted];
+	if (!query._impl->completion) return 0;
+	if (_impl->submission && _impl->submission->completion == query._impl->completion) _impl->submit(false);
+	if (wait) dispatch_group_wait(query._impl->completion, DISPATCH_TIME_FOREVER);
 	if (!occlusionQueryReady(query)) return 0;
 	uint64 result = 0;
 	const uint64 *counts = (const uint64 *)query._impl->buffer.contents;
@@ -1007,8 +1501,23 @@ void Renderer::updateTexture(Texture &texture, const Surface &surface, const Com
 		generateMipmaps(texture);
 }
 
-void Renderer::updateTextureLevel(Texture &texture, uint level, const Surface &surface, const Common::Rect &rect, uint slice) {
+void Renderer::updateTexture(Texture &texture, const Surface &surface, const Common::Rect &rect, const Common::Point &destination) {
+	updateTextureLevel(texture, 0, surface, rect, 0, &destination);
+	if (texture._impl->mipmaps) generateMipmaps(texture);
+}
+
+void Renderer::updateTextureLevel(Texture &texture, uint level, const Surface &surface, const Common::Rect &rect, uint slice,
+		const Common::Point *destination) {
 	@autoreleasepool {
+		if (compressedFormat(texture._impl->texture.pixelFormat)) {
+			// An exceptional CPU patch can promote immutable BC storage through
+			// a GPU conversion, preserving all pixels outside the patch.
+			Texture *expanded = allocateTexture(texture.width(), texture.height());
+			if (!expanded) error("Metal: could not expand compressed texture");
+			copyTexture(*expanded, Common::Rect(texture.width(), texture.height()), texture, Common::Rect(texture.width(), texture.height()));
+			[texture._impl->texture release]; texture._impl->texture = [expanded->_impl->texture retain];
+			texture._impl->mipmaps = false; delete expanded;
+		}
 		if (level >= texture._impl->texture.mipmapLevelCount)
 			error("Metal: mipmap level out of range");
 		uint slices = texture._impl->texture.textureType == MTLTextureTypeCube ? 6 : 1;
@@ -1016,41 +1525,54 @@ void Renderer::updateTextureLevel(Texture &texture, uint level, const Surface &s
 			error("Metal: texture upload slice out of range");
 		Common::Rect area = rect;
 		area.clip(Common::Rect(surface.w, surface.h));
-		area.clip(Common::Rect(MAX(1U, texture.width() >> level), MAX(1U, texture.height() >> level)));
+		Common::Point origin = destination ? *destination : Common::Point(rect.left, rect.top);
+		origin.x += area.left - rect.left; origin.y += area.top - rect.top;
+		if (origin.x < 0) { area.left -= origin.x; origin.x = 0; }
+		if (origin.y < 0) { area.top -= origin.y; origin.y = 0; }
+		area.right = MIN<int>(area.right, area.left + int(MAX(1U, texture.width() >> level)) - origin.x);
+		area.bottom = MIN<int>(area.bottom, area.top + int(MAX(1U, texture.height() >> level)) - origin.y);
 		if (area.isEmpty())
 			return;
 		Surface source = surface.getSubArea(area);
-		bool needsConversion = source.format != PixelFormat::createFormatRGBA32();
-		Surface *converted = needsConversion ? source.convertTo(PixelFormat::createFormatRGBA32()) : nullptr;
+		MTLPixelFormat targetFormat = texture._impl->texture.pixelFormat;
+		PixelFormat uploadFormat = targetFormat == MTLPixelFormatB5G6R5Unorm ? rgb565() :
+			targetFormat == MTLPixelFormatBGRA8Unorm || targetFormat == MTLPixelFormatBGRA8Unorm_sRGB ? PixelFormat::createFormatBGRA32() : PixelFormat::createFormatRGBA32();
+		bool needsConversion = source.format != uploadFormat;
+		Surface *converted = needsConversion ? source.convertTo(uploadFormat) : nullptr;
 		if (needsConversion && !converted)
 			error("Metal: could not convert texture pixels");
 		const Surface *rgba = converted ? converted : &source;
-		uint pitch = (rgba->w * 4 + 255) & ~255U;
+		uint rowBytes = rgba->w * uploadFormat.bytesPerPixel;
+		uint pitch = (rowBytes + 255) & ~255U;
 		NSUInteger offset;
 		id<MTLBuffer> staging = _impl->reserveUploadData((NSUInteger)pitch * rgba->h, offset);
 		for (int y = 0; y < rgba->h; ++y)
-			memcpy((byte *)[staging contents] + offset + y * pitch, rgba->getBasePtr(0, y), rgba->w * 4);
+			memcpy((byte *)[staging contents] + offset + y * pitch, rgba->getBasePtr(0, y), rowBytes);
 		if (converted) {
 			converted->free();
 			delete converted;
 		}
-		_impl->endEncoder();
-		_impl->beginCommand();
-		id<MTLBlitCommandEncoder> blit = [_impl->command blitCommandEncoder];
+		id<MTL4ComputeCommandEncoder> blit = _impl->beginCopy(staging, texture._impl->texture);
 		[blit copyFromBuffer:staging sourceOffset:offset sourceBytesPerRow:pitch sourceBytesPerImage:pitch * area.height()
 			sourceSize:MTLSizeMake(area.width(), area.height(), 1) toTexture:texture._impl->texture destinationSlice:slice
-			destinationLevel:level destinationOrigin:MTLOriginMake(area.left, area.top, 0)];
-		[blit endEncoding];
+			destinationLevel:level destinationOrigin:MTLOriginMake(origin.x, origin.y, 0)];
+		_impl->finishPass(blit);
 	}
 }
 
 void Renderer::generateMipmaps(Texture &texture) {
 	@autoreleasepool {
+		if (compressedFormat(texture._impl->texture.pixelFormat)) {
+			Texture *expanded = allocateTexture(texture.width(), texture.height(), true);
+			if (!expanded) error("Metal: could not expand compressed mipmap texture");
+			copyTexture(*expanded, Common::Rect(texture.width(), texture.height()), texture, Common::Rect(texture.width(), texture.height()));
+			[texture._impl->texture release]; texture._impl->texture = [expanded->_impl->texture retain];
+			texture._impl->mipmaps = true; delete expanded; return;
+		}
 		if (texture.width() == 1 && texture.height() == 1 && texture.depth() == 1)
 			return;
 		_impl->resolveTextureOwner(texture._impl);
-		_impl->beginCommand();
-		id<MTLBlitCommandEncoder> blit = [_impl->command blitCommandEncoder];
+		id<MTL4ComputeCommandEncoder> blit = _impl->beginCopy(texture._impl->texture);
 		if (!texture._impl->mipmaps) {
 			if (texture._impl->owner) error("Metal: cannot replace a render target with a mipmapped image");
 			id<MTLTexture> old = texture._impl->texture;
@@ -1065,6 +1587,7 @@ void Renderer::generateMipmaps(Texture &texture) {
 			while (extent > 1) { ++descriptor.mipmapLevelCount; extent >>= 1; }
 			id<MTLTexture> replacement = [_impl->device newTextureWithDescriptor:descriptor];
 			if (!replacement) error("Metal: could not allocate mipmapped image");
+			_impl->accessResource(replacement, MTLStageBlit, true);
 			uint slices = old.textureType == MTLTextureTypeCube ? 6 : 1;
 			for (uint slice = 0; slice < slices; ++slice)
 				[blit copyFromTexture:old sourceSlice:slice sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
@@ -1074,8 +1597,9 @@ void Renderer::generateMipmaps(Texture &texture) {
 			texture._impl->mipmaps = true;
 			[old release];
 		}
+		[blit barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
 		[blit generateMipmapsForTexture:texture._impl->texture];
-		[blit endEncoding];
+		_impl->finishPass(blit);
 	}
 }
 
@@ -1086,11 +1610,7 @@ void Renderer::copyTexture(Texture &destination, const Common::Rect &destination
 			!Common::Rect(destination.width(), destination.height()).contains(destinationRect) ||
 			!Common::Rect(source.width(), source.height()).contains(sourceRect))
 			error("Metal: invalid texture copy rectangles");
-		// Resolve pending rendering before sampling the source texture.
-		if (_impl->target->color && (_impl->target->clearColorPending || _impl->target->clearDepthPending || _impl->target->clearStencilPending))
-			_impl->beginEncoder();
 		_impl->resolveTextureOwner(source._impl);
-		_impl->beginCommand();
 		if (source._impl->texture == destination._impl->texture) {
 			// Stage overlapping or aliased copies entirely on the GPU.
 			MTLTextureDescriptor *descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:source._impl->texture.pixelFormat
@@ -1102,16 +1622,32 @@ void Renderer::copyTexture(Texture &destination, const Common::Rect &destination
 			temporary->mipmaps = false;
 			if (!temporary->texture) { delete temporary; error("Metal: could not stage aliased copy"); }
 			Texture snapshot(temporary);
-			id<MTLBlitCommandEncoder> blit = [_impl->command blitCommandEncoder];
+			id<MTL4ComputeCommandEncoder> blit = _impl->beginCopy(source._impl->texture, temporary->texture);
 			[blit copyFromTexture:source._impl->texture sourceSlice:0 sourceLevel:0
 				sourceOrigin:MTLOriginMake(sourceRect.left, sourceRect.top, 0)
 				sourceSize:MTLSizeMake(sourceRect.width(), sourceRect.height(), 1)
 				toTexture:temporary->texture destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0,0,0)];
-			[blit endEncoding];
+			_impl->finishPass(blit);
 			copyTexture(destination, destinationRect, snapshot, Common::Rect(sourceRect.width(), sourceRect.height()), flipY);
 			return;
 		}
-		// Copies into native targets must update their multisample storage too.
+		// Single-sample targets can use the same blit as ordinary textures.
+		// Resolve deferred clears first so partial copies preserve defined pixels.
+		if (!flipY && sourceRect.width() == destinationRect.width() && sourceRect.height() == destinationRect.height() &&
+		    source._impl->texture.pixelFormat == destination._impl->texture.pixelFormat &&
+		    source._impl->texture.textureType == MTLTextureType2D && destination._impl->texture.textureType == MTLTextureType2D &&
+		    (!destination._impl->owner || destination._impl->owner->samples == 1)) {
+			_impl->resolveTextureOwner(destination._impl);
+			id<MTL4ComputeCommandEncoder> blit = _impl->beginCopy(source._impl->texture, destination._impl->texture);
+			[blit copyFromTexture:source._impl->texture sourceSlice:0 sourceLevel:0
+				sourceOrigin:MTLOriginMake(sourceRect.left,sourceRect.top,0) sourceSize:MTLSizeMake(sourceRect.width(),sourceRect.height(),1)
+				toTexture:destination._impl->texture destinationSlice:0 destinationLevel:0
+				destinationOrigin:MTLOriginMake(destinationRect.left,destinationRect.top,0)];
+			_impl->finishPass(blit);
+			if (destination._impl->mipmaps) generateMipmaps(destination);
+			return;
+		}
+		// Copies into multisample targets must update their multisample storage too.
 		// Otherwise a later load/resolve would overwrite the copied color.
 		if (destination._impl->owner) {
 			Target *previous = _impl->target;
@@ -1135,11 +1671,15 @@ void Renderer::copyTexture(Texture &destination, const Common::Rect &destination
 			_impl->query = previousQuery;
 			return;
 		}
-		MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+		_impl->beginCommand();
+		MTL4RenderPassDescriptor *pass = [[[MTL4RenderPassDescriptor alloc] init] autorelease];
 		pass.colorAttachments[0].texture = destination._impl->texture;
 		pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
 		pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-		id<MTLRenderCommandEncoder> encoder = [_impl->command renderCommandEncoderWithDescriptor:pass];
+		_impl->useResource(pass.colorAttachments[0].texture);
+		id<MTL4RenderCommandEncoder> encoder = [_impl->command renderCommandEncoderWithDescriptor:pass];
+		_impl->orderEncoder(encoder);
+		_impl->accessResource(pass.colorAttachments[0].texture, MTLStageFragment, true); _impl->newBindings();
 		if (!encoder)
 			error("Metal: could not create texture copy pass");
 		float left = sourceRect.left / (float)source.width(), right = sourceRect.right / (float)source.width();
@@ -1151,18 +1691,21 @@ void Renderer::copyTexture(Texture &destination, const Common::Rect &destination
 		uniforms.textured = 1;
 		DrawState state;
 		state.linear = false;
-		[encoder setRenderPipelineState:_impl->pipeline(state, true, nullptr, destination._impl->texture.pixelFormat)];
+		id<MTLRenderPipelineState> pipeline = _impl->pipeline(state, true, nullptr, destination._impl->texture.pixelFormat);
+		_impl->keep(pipeline); [encoder setRenderPipelineState:pipeline];
 		[encoder setViewport:MTLViewport{(double)destinationRect.left, (double)destinationRect.top,
 			(double)destinationRect.width(), (double)destinationRect.height(), 0, 1}];
 		[encoder setScissorRect:MTLScissorRect{(NSUInteger)destinationRect.left, (NSUInteger)destinationRect.top,
 			(NSUInteger)destinationRect.width(), (NSUInteger)destinationRect.height()}];
-		[encoder setVertexBytes:vertices length:sizeof(vertices) atIndex:0];
-		[encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
-		[encoder setFragmentBytes:&uniforms length:sizeof(uniforms) atIndex:1];
-		[encoder setFragmentTexture:source._impl->texture atIndex:0];
-		[encoder setFragmentSamplerState:_impl->sampler(state, false) atIndex:0];
+		_impl->bindBytes(_impl->vertexArguments, vertices, sizeof(vertices), 0);
+		NSUInteger sharedUniformOffset;
+		id<MTLBuffer> sharedUniforms = _impl->uploadDrawData(&uniforms, sizeof(uniforms), sharedUniformOffset);
+		_impl->bindBuffer(_impl->vertexArguments, sharedUniforms, sharedUniformOffset, 1);
+		_impl->bindBuffer(_impl->fragmentArguments, sharedUniforms, sharedUniformOffset, 1);
+		_impl->bindTexture(_impl->fragmentArguments, source._impl->texture, _impl->sampler(state, false), 0);
+		_impl->bindArguments(encoder);
 		[encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
-		[encoder endEncoding];
+		_impl->finishPass(encoder);
 		if (destination._impl->mipmaps)
 			generateMipmaps(destination);
 	}
@@ -1256,28 +1799,34 @@ Program *Renderer::createProgramStages(const char *source, const char *vertexFun
 				MTLVertexFormatFloat2, MTLVertexFormatFloat3, MTLVertexFormatFloat4};
 			for (uint i = 0; i < attributeCount; ++i) {
 				const VertexAttribute &attribute = attributes[i];
+				uint bytes = attribute.type == VertexAttribute::kUNorm8 ? 1 : 4;
 				if (attribute.index >= 31 || !attribute.components || attribute.components > 4 ||
-				    attribute.offset > vertexStride || attribute.components * 4 > vertexStride - attribute.offset) {
+				    attribute.offset > vertexStride || attribute.components * bytes > vertexStride - attribute.offset ||
+				    (attribute.type == VertexAttribute::kUNorm8 && attribute.components != 4)) {
 					delete program; return nullptr;
 				}
 				MTLVertexAttributeDescriptor *descriptor = program->vertexDescriptor.attributes[attribute.index];
-				descriptor.format = formats[attribute.components];
+				descriptor.format = attribute.type == VertexAttribute::kUNorm8 ? MTLVertexFormatUChar4Normalized : formats[attribute.components];
 				descriptor.offset = attribute.offset;
 				descriptor.bufferIndex = 0;
 			}
 		}
-		MTLCompileOptions *options = [[[MTLCompileOptions alloc] init] autorelease];
-		options.languageVersion = MTLLanguageVersion3_0;
+		NSMutableData *identity = [NSMutableData data];
+		for (const char *text : {source, fragmentSource, vertexFunction, fragmentFunction})
+			[identity appendBytes:text length:strlen(text) + 1];
+		const uint64 layout[] = {vertexStride, attributeCount};
+		[identity appendBytes:layout length:sizeof(layout)];
+		for (uint i = 0; i < attributeCount; ++i) {
+			const uint64 attribute[] = {attributes[i].index, attributes[i].offset, attributes[i].components, attributes[i].type};
+			[identity appendBytes:attribute length:sizeof(attribute)];
+		}
+		program->cacheIdentity = [PipelineArchiveCache::digest(identity) retain];
 		NSError *failure = nil;
-		program->library = [_impl->device newLibraryWithSource:[NSString stringWithUTF8String:source] options:options error:&failure];
+		program->library = _impl->cachedLibrary(source, &failure);
 		if (program->library) {
-			program->vertex = [program->library newFunctionWithName:[NSString stringWithUTF8String:vertexFunction]];
-			if (source == fragmentSource)
-				program->fragmentLibrary = [program->library retain];
-			else
-				program->fragmentLibrary = [_impl->device newLibraryWithSource:[NSString stringWithUTF8String:fragmentSource] options:options error:&failure];
-			if (program->fragmentLibrary)
-				program->fragment = [program->fragmentLibrary newFunctionWithName:[NSString stringWithUTF8String:fragmentFunction]];
+			program->vertex = functionDescriptor(program->library, [NSString stringWithUTF8String:vertexFunction]);
+			program->fragmentLibrary = source == fragmentSource ? [program->library retain] : _impl->cachedLibrary(fragmentSource, &failure);
+			program->fragment = functionDescriptor(program->fragmentLibrary, [NSString stringWithUTF8String:fragmentFunction]);
 		}
 		if (!program->vertex || !program->fragment) {
 			warning("Metal program '%s/%s': %s", vertexFunction, fragmentFunction,
@@ -1292,50 +1841,111 @@ Program *Renderer::createProgramStages(const char *source, const char *vertexFun
 bool Renderer::validateProgram(Program &program, TargetFormat format, uint samples) {
 	@autoreleasepool {
 		if (!_impl->device || !supportsSamples(samples)) return false;
-		MTLRenderPipelineDescriptor *descriptor = [[[MTLRenderPipelineDescriptor alloc] init] autorelease];
-		descriptor.vertexFunction = program._impl->vertex;
-		descriptor.fragmentFunction = program._impl->fragment;
-		descriptor.vertexDescriptor = program._impl->vertexDescriptor;
-		descriptor.rasterSampleCount = samples;
-		descriptor.colorAttachments[0].pixelFormat = format == kTargetRGBA16Float ? MTLPixelFormatRGBA16Float :
+		MTLPixelFormat pixelFormat = format == kTargetRGBA16Float ? MTLPixelFormatRGBA16Float :
 			format == kTargetSRGBA8 ? MTLPixelFormatRGBA8Unorm_sRGB : MTLPixelFormatBGRA8Unorm;
-		descriptor.depthAttachmentPixelFormat = descriptor.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
-		NSError *failure = nil;
-		id<MTLRenderPipelineState> pipeline = [_impl->device newRenderPipelineStateWithDescriptor:descriptor error:&failure];
-		if (!pipeline) warning("Metal program interface: %s", failure ? [[failure localizedDescription] UTF8String] : "pipeline unavailable");
-		bool success = pipeline != nil;
-		[pipeline release];
-		return success;
+		DrawState state; state.primitive = kTriangleStrip;
+		return _impl->pipeline(state, false, program._impl, pixelFormat, samples, false) != nil;
+	}
+}
+
+Buffer *Renderer::createBuffer(const void *data, uint size) {
+	@autoreleasepool {
+		if (!_impl->device || !data || !size) return nullptr;
+		Buffer::Impl *buffer = new Buffer::Impl;
+		buffer->length = size;
+		buffer->buffer = [_impl->device newBufferWithBytes:data length:size options:MTLResourceStorageModeShared];
+		_impl->counters.persistentBufferBytes += size;
+		if (!buffer->buffer) { delete buffer; return nullptr; }
+		return new Buffer(buffer);
+	}
+}
+
+Buffer *Renderer::createTransientBuffer(const void *data, uint size) {
+	@autoreleasepool {
+		if (!_impl->device || !data || !size) return nullptr;
+		Buffer::Impl *buffer = new Buffer::Impl;
+		buffer->buffer = [_impl->uploadDrawData(data, size, buffer->offset) retain];
+		buffer->length = size; buffer->lease = _impl->drawBufferLease;
+		return new Buffer(buffer);
+	}
+}
+
+void Renderer::updateBuffer(Buffer &buffer, const void *data, uint size) {
+	@autoreleasepool {
+		if (!data || !size) error("Metal: invalid persistent buffer update");
+		// Keep the immutable version when animation/material setters repeat
+		// identical data. The shared storage is only ever read by the GPU.
+		if (buffer._impl->length == size && !memcmp((const byte *)buffer._impl->buffer.contents + buffer._impl->offset, data, size)) return;
+		id<MTLBuffer> replacement = [_impl->device newBufferWithBytes:data length:size options:MTLResourceStorageModeShared];
+		if (!replacement) error("Metal: could not replace persistent buffer");
+		[buffer._impl->buffer release]; buffer._impl->buffer = replacement;
+		buffer._impl->offset = 0; buffer._impl->length = size; buffer._impl->lease.reset();
+		_impl->counters.persistentBufferBytes += size;
 	}
 }
 
 void Renderer::drawProgram(Program &program, const void *vertices, uint count, uint stride,
 		const uint32 *indices, uint indexCount, const void *uniforms, uint uniformSize,
 		const TextureBinding *textures, uint textureCount, const DrawState &state,
-		const void *fragmentUniforms, uint fragmentUniformSize) {
+		const void *fragmentUniforms, uint fragmentUniformSize, const GeometryBinding *geometry, const UniformBindings *bindings) {
 	@autoreleasepool {
-		if (!vertices || !count || !stride || !_impl->target->color || _impl->viewport.isEmpty() ||
+		if ((!vertices && !(geometry && geometry->vertices)) || !count || !stride || !_impl->target->color || _impl->viewport.isEmpty() ||
 			(state.scissor && !state.scissorRect.intersects(Common::Rect(width(), height()))))
 			return;
-		if ((indexCount && !indices) || (uniformSize && !uniforms) || (fragmentUniformSize && !fragmentUniforms) || (textureCount && !textures) || textureCount > 16)
+		if ((indexCount && !indices && !(geometry && geometry->indices)) || (uniformSize && !uniforms) || (fragmentUniformSize && !fragmentUniforms) || (textureCount && !textures) || textureCount > 16)
 			error("Metal: invalid native program draw");
-		for (uint i = 0; i < indexCount; ++i)
+		for (uint i = 0; indices && !(geometry && geometry->indices) && i < indexCount; ++i)
 			if (indices[i] >= count)
 				error("Metal: native program index out of range");
 		// With explicit bindings, slot zero is set below before the draw. Keep
 		// the default white texture only for programs with no supplied textures.
 		_impl->prepareDraw(nullptr, state, Uniforms(), program._impl, textureCount == 0);
 		NSUInteger vertexOffset = 0, uniformOffset = 0, indexOffset = 0, fragmentOffset = 0;
-		id<MTLBuffer> vertexBuffer = _impl->uploadDrawData(vertices, (NSUInteger)count * stride, vertexOffset);
-		id<MTLBuffer> uniformBuffer = _impl->uploadDrawData(uniforms, uniformSize, uniformOffset);
-		id<MTLBuffer> fragmentBuffer = fragmentUniformSize ? _impl->uploadDrawData(fragmentUniforms, fragmentUniformSize, fragmentOffset) : uniformBuffer;
-		if (!fragmentUniformSize) fragmentOffset = uniformOffset;
-		id<MTLBuffer> indexBuffer = _impl->uploadDrawData(indices, (NSUInteger)indexCount * sizeof(uint32), indexOffset);
-		if (!vertexBuffer || (uniformSize && !uniformBuffer) || (fragmentUniformSize && !fragmentBuffer) || (indexCount && !indexBuffer))
+		id<MTLBuffer> vertexBuffer;
+		if (geometry && geometry->vertices) {
+			vertexBuffer = geometry->vertices->_impl->buffer; vertexOffset = geometry->vertexOffset;
+			if (vertexOffset > geometry->vertices->size() || (uint64)count * stride > geometry->vertices->size() - vertexOffset)
+				error("Metal: persistent vertex range out of bounds");
+			vertexOffset += geometry->vertices->_impl->offset;
+		} else vertexBuffer = _impl->uploadDrawData(vertices, (NSUInteger)count * stride, vertexOffset);
+		bool vertexUniformUsed = program._impl->vertexBufferMask & 2U, fragmentUniformUsed = program._impl->fragmentBufferMask & 2U;
+		const Buffer *vertexUniform = bindings ? bindings->vertex : nullptr;
+		const Buffer *fragmentUniform = bindings && bindings->fragment ? bindings->fragment : !fragmentUniformSize ? vertexUniform : nullptr;
+		id<MTLBuffer> uniformBuffer = nil, fragmentBuffer = nil;
+		if (vertexUniform) uniformOffset = vertexUniform->_impl->offset;
+		if (fragmentUniform) fragmentOffset = fragmentUniform->_impl->offset;
+		if (vertexUniformUsed) uniformBuffer = vertexUniform ? vertexUniform->_impl->buffer : _impl->uploadDrawData(uniforms, uniformSize, uniformOffset);
+		if (fragmentUniformUsed) {
+			if (!fragmentUniformSize && fragmentUniform == vertexUniform && vertexUniformUsed) { fragmentBuffer = uniformBuffer; fragmentOffset = uniformOffset; }
+			else fragmentBuffer = fragmentUniform ? fragmentUniform->_impl->buffer :
+				_impl->uploadDrawData(fragmentUniformSize ? fragmentUniforms : uniforms, fragmentUniformSize ? fragmentUniformSize : uniformSize, fragmentOffset);
+		}
+		bool indices16 = geometry && geometry->indices && geometry->indices16;
+		id<MTLBuffer> indexBuffer;
+		if (geometry && geometry->indices) {
+			indexBuffer = geometry->indices->_impl->buffer; indexOffset = geometry->indexOffset;
+			uint indexSize = indices16 ? 2 : 4;
+			if (indexOffset % indexSize || indexOffset > geometry->indices->size() || (uint64)indexCount * indexSize > geometry->indices->size() - indexOffset)
+				error("Metal: persistent index range out of bounds");
+			indexOffset += geometry->indices->_impl->offset;
+		} else indexBuffer = _impl->uploadDrawData(indices, (NSUInteger)indexCount * sizeof(uint32), indexOffset);
+		if (!vertexBuffer || (vertexUniformUsed && uniformSize && !uniformBuffer) || (fragmentUniformUsed && (fragmentUniformSize || uniformSize) && !fragmentBuffer) || (indexCount && !indexBuffer))
 			error("Metal: could not allocate native program draw buffers");
-		[_impl->encoder setVertexBuffer:vertexBuffer offset:vertexOffset atIndex:0];
-		[_impl->encoder setVertexBuffer:uniformBuffer offset:uniformOffset atIndex:1];
-		[_impl->encoder setFragmentBuffer:fragmentBuffer offset:fragmentOffset atIndex:1];
+		_impl->bindBuffer(_impl->vertexArguments, vertexBuffer, vertexOffset, 0);
+		if (vertexUniformUsed) _impl->bindBuffer(_impl->vertexArguments, uniformBuffer, uniformOffset, 1);
+		if (fragmentUniformUsed) _impl->bindBuffer(_impl->fragmentArguments, fragmentBuffer, fragmentOffset, 1);
+		if (bindings) {
+			if (bindings->extraSize && !bindings->extraData) error("Metal: invalid auxiliary uniforms");
+			bool vertexExtraUsed = program._impl->vertexBufferMask & 4U, fragmentExtraUsed = program._impl->fragmentBufferMask & 4U;
+			NSUInteger offset = 0;
+			id<MTLBuffer> extra = nil;
+			if ((vertexExtraUsed || fragmentExtraUsed) && bindings->extraSize)
+				extra = _impl->uploadDrawData(bindings->extraData, bindings->extraSize, offset);
+			if (vertexExtraUsed) _impl->bindBuffer(_impl->vertexArguments,
+				bindings->extraVertex ? bindings->extraVertex->_impl->buffer : extra, bindings->extraVertex ? bindings->extraVertex->_impl->offset : offset, 2);
+			if (fragmentExtraUsed) _impl->bindBuffer(_impl->fragmentArguments,
+				bindings->extraFragment ? bindings->extraFragment->_impl->buffer : extra, bindings->extraFragment ? bindings->extraFragment->_impl->offset : offset, 2);
+		}
 		for (uint i = 0; i < textureCount; ++i) {
 			Texture::Impl *texture = textures[i].texture ? textures[i].texture->_impl : nullptr;
 			DrawState sampling;
@@ -1348,13 +1958,13 @@ void Renderer::drawProgram(Program &program, const void *vertices, uint count, u
 			sampling.anisotropy = textures[i].anisotropy;
 			id<MTLTexture> image = texture ? texture->texture : _impl->white;
 			id<MTLSamplerState> sampler = _impl->sampler(sampling, texture && texture->mipmaps && sampling.mipmaps);
-			[_impl->encoder setFragmentTexture:image atIndex:i];
-			[_impl->encoder setFragmentSamplerState:sampler atIndex:i];
-			[_impl->encoder setVertexTexture:image atIndex:i];
-			[_impl->encoder setVertexSamplerState:sampler atIndex:i];
+			if (program._impl->fragmentTextureMask & (1U << i)) _impl->bindTexture(_impl->fragmentArguments, image, sampler, i);
+			if (program._impl->vertexTextureMask & (1U << i)) _impl->bindTexture(_impl->vertexArguments, image, sampler, i);
 		}
+		_impl->accessResource(indexBuffer, MTLStageVertex);
+		_impl->bindArguments(_impl->encoder);
 		if (indexCount)
-			[_impl->encoder drawIndexedPrimitives:primitiveType(state.primitive) indexCount:indexCount indexType:MTLIndexTypeUInt32 indexBuffer:indexBuffer indexBufferOffset:indexOffset];
+			[_impl->encoder drawIndexedPrimitives:primitiveType(state.primitive) indexCount:indexCount indexType:(indices16 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32) indexBuffer:indexBuffer.gpuAddress + indexOffset indexBufferLength:indexBuffer.length - indexOffset];
 		else
 			[_impl->encoder drawPrimitives:primitiveType(state.primitive) vertexStart:0 vertexCount:count];
 	}
@@ -1370,7 +1980,8 @@ void Renderer::draw(const Vertex *vertices, uint count, Texture *texture, const 
 		id<MTLBuffer> buffer = _impl->uploadDrawData(vertices, sizeof(Vertex) * (NSUInteger)count, offset);
 		if (!buffer)
 			error("Metal: could not allocate vertices");
-		[_impl->encoder setVertexBuffer:buffer offset:offset atIndex:0];
+		_impl->bindBuffer(_impl->vertexArguments, buffer, offset, 0);
+		_impl->bindArguments(_impl->encoder);
 		[_impl->encoder drawPrimitives:primitiveType(state.primitive) vertexStart:0 vertexCount:count];
 	}
 }
@@ -1390,8 +2001,35 @@ void Renderer::drawIndexed(const Vertex *vertices, uint count, const uint32 *ind
 		id<MTLBuffer> indexBuffer = _impl->uploadDrawData(indices, sizeof(uint32) * (NSUInteger)indexCount, indexOffset);
 		if (!vertexBuffer || !indexBuffer)
 			error("Metal: could not allocate indexed vertices");
-		[_impl->encoder setVertexBuffer:vertexBuffer offset:vertexOffset atIndex:0];
-		[_impl->encoder drawIndexedPrimitives:primitiveType(state.primitive) indexCount:indexCount indexType:MTLIndexTypeUInt32 indexBuffer:indexBuffer indexBufferOffset:indexOffset];
+		_impl->bindBuffer(_impl->vertexArguments, vertexBuffer, vertexOffset, 0);
+		_impl->accessResource(indexBuffer, MTLStageVertex);
+		_impl->bindArguments(_impl->encoder);
+		[_impl->encoder drawIndexedPrimitives:primitiveType(state.primitive) indexCount:indexCount indexType:MTLIndexTypeUInt32 indexBuffer:indexBuffer.gpuAddress + indexOffset indexBufferLength:indexBuffer.length - indexOffset];
+	}
+}
+
+void Renderer::drawBuffered(const GeometryBinding &geometry, uint count, uint indexCount,
+		Texture *texture, const DrawState &state, const Uniforms &uniforms) {
+	@autoreleasepool {
+		if (!geometry.vertices || !count || !_impl->target->color || _impl->viewport.isEmpty() ||
+		    (state.scissor && !state.scissorRect.intersects(Common::Rect(width(), height())))) return;
+		id<MTLBuffer> vertices = geometry.vertices->_impl->buffer;
+		id<MTLBuffer> indices = geometry.indices ? geometry.indices->_impl->buffer : nil;
+		uint indexSize = geometry.indices16 ? 2 : 4;
+		if (geometry.vertexOffset > geometry.vertices->size() || uint64(count) * sizeof(Vertex) > geometry.vertices->size() - geometry.vertexOffset ||
+		    (indexCount && (!indices || geometry.indexOffset % indexSize || geometry.indexOffset > geometry.indices->size() ||
+		    uint64(indexCount) * indexSize > geometry.indices->size() - geometry.indexOffset)))
+			error("Metal: buffered geometry range out of bounds");
+		_impl->prepareDraw(texture ? texture->_impl : nullptr, state, uniforms);
+		_impl->bindBuffer(_impl->vertexArguments, vertices, geometry.vertices->_impl->offset + geometry.vertexOffset, 0);
+		_impl->accessResource(indices, MTLStageVertex);
+		_impl->bindArguments(_impl->encoder);
+		if (indexCount)
+			[_impl->encoder drawIndexedPrimitives:primitiveType(state.primitive) indexCount:indexCount
+				indexType:(geometry.indices16 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32)
+				indexBuffer:indices.gpuAddress + geometry.indices->_impl->offset + geometry.indexOffset indexBufferLength:geometry.indices->size() - geometry.indexOffset];
+		else
+			[_impl->encoder drawPrimitives:primitiveType(state.primitive) vertexStart:0 vertexCount:count];
 	}
 }
 
@@ -1468,7 +2106,8 @@ bool Renderer::present(RenderTarget *source) {
 		setRenderTarget(source);
 		if (!_impl->target->color)
 			return false;
-		_impl->beginEncoder();
+		if (_impl->target->clearColorPending || _impl->target->clearDepthPending || _impl->target->clearStencilPending)
+			_impl->beginEncoder();
 		_impl->endEncoder();
 		if (!_impl->layer) {
 			_impl->submit(false);
@@ -1481,11 +2120,15 @@ bool Renderer::present(RenderTarget *source) {
 			setRenderTarget(nullptr);
 			return false;
 		}
-		MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+		[_impl->queue waitForDrawable:drawable];
+		MTL4RenderPassDescriptor *pass = [[[MTL4RenderPassDescriptor alloc] init] autorelease];
 		pass.colorAttachments[0].texture = drawable.texture;
 		pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
 		pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-		id<MTLRenderCommandEncoder> encoder = [_impl->command renderCommandEncoderWithDescriptor:pass];
+		_impl->useResource(pass.colorAttachments[0].texture);
+		id<MTL4RenderCommandEncoder> encoder = [_impl->command renderCommandEncoderWithDescriptor:pass];
+		_impl->orderEncoder(encoder);
+		_impl->accessResource(pass.colorAttachments[0].texture, MTLStageFragment, true); _impl->newBindings();
 		DrawState state;
 		Uniforms uniforms;
 		uniforms.textured = 1;
@@ -1493,29 +2136,48 @@ bool Renderer::present(RenderTarget *source) {
 			{{-1, 1, 0}, {0, 0}, {1, 1, 1, 1}}, {{-1, -1, 0}, {0, 1}, {1, 1, 1, 1}},
 			{{1, 1, 0}, {1, 0}, {1, 1, 1, 1}}, {{1, -1, 0}, {1, 1}, {1, 1, 1, 1}}
 		};
-		[encoder setRenderPipelineState:_impl->pipeline(state, true)];
-		[encoder setVertexBytes:vertices length:sizeof(vertices) atIndex:0];
-		[encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:1];
-		[encoder setFragmentBytes:&uniforms length:sizeof(uniforms) atIndex:1];
-		[encoder setFragmentTexture:_impl->target->color atIndex:0];
-		[encoder setFragmentSamplerState:_impl->sampler(state, false) atIndex:0];
+		id<MTLRenderPipelineState> pipeline = _impl->pipeline(state, true);
+		_impl->keep(pipeline); [encoder setRenderPipelineState:pipeline];
+		_impl->bindBytes(_impl->vertexArguments, vertices, sizeof(vertices), 0);
+		NSUInteger sharedUniformOffset;
+		id<MTLBuffer> sharedUniforms = _impl->uploadDrawData(&uniforms, sizeof(uniforms), sharedUniformOffset);
+		_impl->bindBuffer(_impl->vertexArguments, sharedUniforms, sharedUniformOffset, 1);
+		_impl->bindBuffer(_impl->fragmentArguments, sharedUniforms, sharedUniformOffset, 1);
+		_impl->bindTexture(_impl->fragmentArguments, _impl->target->color, _impl->sampler(state, false), 0);
+		_impl->bindArguments(encoder);
 		[encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
-		[encoder endEncoding];
-		[_impl->command presentDrawable:drawable];
+		_impl->finishPass(encoder);
 		_impl->submit(false);
+		[_impl->queue signalDrawable:drawable];
+		[drawable present];
 		setRenderTarget(nullptr);
 		return true;
 	}
 }
 
+void Renderer::waitFor(Renderer &producer) {
+	@autoreleasepool {
+		if (&producer == this) return;
+		if (!_impl->queue || !producer._impl->queue || _impl->device != producer._impl->device)
+			error("Metal: queue dependency requires the same active device");
+		_impl->submit(false);
+		producer._impl->submit(false);
+		if (!producer._impl->dependencyEvent) producer._impl->dependencyEvent = [_impl->device newEvent];
+		if (!producer._impl->dependencyEvent) error("Metal: could not create queue dependency event");
+		uint64 value = ++producer._impl->dependencyValue;
+		[producer._impl->queue signalEvent:producer._impl->dependencyEvent value:value];
+		[_impl->queue waitForEvent:producer._impl->dependencyEvent value:value];
+		[_impl->pendingEvents addObject:producer._impl->dependencyEvent];
+		producer._impl->queueSyncPending = _impl->queueSyncPending = true;
+	}
+}
+
+Statistics Renderer::statistics() const { return _impl->counters; }
+void Renderer::resetStatistics() { _impl->counters = Statistics(); }
+
 void Renderer::flush(bool wait) {
 	@autoreleasepool {
 		_impl->submit(wait);
-		if (wait && _impl->queue) {
-			id<MTLCommandBuffer> fence = [_impl->queue commandBuffer];
-			[fence commit];
-			[fence waitUntilCompleted];
-		}
 	}
 }
 
@@ -1525,6 +2187,7 @@ bool Renderer::readPixels(Surface &surface, const Common::Rect &rect) {
 	Texture::Impl *view = new Texture::Impl();
 	view->texture = [_impl->target->color retain];
 	view->mipmaps = false;
+	view->owner = _impl->target;
 	Texture texture(view);
 	return readTexture(texture, surface, rect);
 }
@@ -1533,10 +2196,12 @@ bool Renderer::readTexture(Texture &texture, Surface &surface, const Common::Rec
 	@autoreleasepool {
 		if (rect.isEmpty() || !Common::Rect(texture.width(), texture.height()).contains(rect))
 			return false;
-		if (texture._impl->texture.pixelFormat == MTLPixelFormatRGBA16Float) {
+		MTLPixelFormat inputFormat = texture._impl->texture.pixelFormat;
+		if (inputFormat == MTLPixelFormatRGBA16Float || inputFormat == MTLPixelFormatB5G6R5Unorm ||
+		    inputFormat == MTLPixelFormatR8Unorm || compressedFormat(inputFormat)) {
 			RenderTarget *previous = renderTarget();
 			Common::Rect previousViewport = viewport();
-			RenderTarget *converted = createRenderTarget(rect.width(), rect.height());
+			RenderTarget *converted = createRenderTarget(rect.width(), rect.height(), 1, kTargetBGRA8, false, false);
 			if (!converted) return false;
 			copyTexture(converted->texture(), Common::Rect(rect.width(), rect.height()), texture, rect);
 			bool success = readTexture(converted->texture(), surface, Common::Rect(rect.width(), rect.height()));
@@ -1552,11 +2217,11 @@ bool Renderer::readTexture(Texture &texture, Surface &surface, const Common::Rec
 		id<MTLBuffer> staging = [_impl->device newBufferWithLength:pitch * rect.height() options:MTLResourceStorageModeShared];
 		if (!staging)
 			return false;
-		id<MTLBlitCommandEncoder> blit = [_impl->command blitCommandEncoder];
+		id<MTL4ComputeCommandEncoder> blit = _impl->beginCopy(texture._impl->texture, staging);
 		[blit copyFromTexture:texture._impl->texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(rect.left, rect.top, 0)
 			sourceSize:MTLSizeMake(rect.width(), rect.height(), 1) toBuffer:staging destinationOffset:0
 			destinationBytesPerRow:pitch destinationBytesPerImage:pitch * rect.height()];
-		[blit endEncoding];
+		_impl->finishPass(blit);
 		_impl->submit(true);
 		surface.free();
 		surface.create(rect.width(), rect.height(), PixelFormat::createFormatRGBA32());

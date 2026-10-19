@@ -6,6 +6,7 @@
 #include "engines/grim/metal_draw.h"
 #include "engines/grim/metal_shader_sources.h"
 #include "common/endian.h"
+#include "graphics/metal/shader-source.h"
 #include "common/textconsole.h"
 
 namespace Grim {
@@ -20,6 +21,7 @@ Context::Context() {
 	_state.srcAlpha = Graphics::Metal::kSrcAlpha;
 }
 Context::~Context() {
+	invalidateGeometry();
 	if (_renderer) _renderer->flush(true);
 	for (auto &entry : _images) delete entry._value.texture;
 	delete _white;
@@ -49,7 +51,8 @@ Shader *Shader::fromFiles(const char *name, const char *const *attributes) {
 	for (const ShaderSource &source : kShaderSources) {
 		if (strcmp(source.name, name)) continue;
 		Common::String msl(kShaderPrelude);
-		msl += source.source;
+		Common::String replacement = Graphics::Metal::shaderOverride("grim", name);
+		msl += replacement.empty() ? source.source : replacement.c_str();
 		Shader *shader = new Shader();
 		shader->_program.reset(context._renderer->createProgram(msl.c_str(), source.vertexEntry, source.fragmentEntry));
 		if (!shader->_program) error("Grim: cannot compile native shader %s", name);
@@ -119,6 +122,7 @@ void Context::metalGenBuffers(uint count, uint32 *buffers) {
 }
 void Context::metalDeleteBuffers(uint count, const uint32 *buffers) {
 	for (uint i = 0; i < count; ++i) {
+		invalidateGeometry(buffers[i]);
 		_buffers.erase(buffers[i]);
 		if (_arrayBuffer == buffers[i]) _arrayBuffer = 0;
 		if (_elementBuffer == buffers[i]) _elementBuffer = 0;
@@ -131,11 +135,13 @@ void Context::metalBindBuffer(StateToken target, uint32 buffer) {
 	else error("Grim: invalid native buffer target");
 }
 void Context::metalBufferData(StateToken target, uint size, const void *data, StateToken usage) {
+	invalidateGeometry(boundBuffer(target));
 	Common::Array<byte> &buffer = _buffers[boundBuffer(target)];
 	buffer.resize(size);
 	if (size) { if (data) memcpy(buffer.data(), data, size); else memset(buffer.data(), 0, size); }
 }
 void Context::metalBufferSubData(StateToken target, uint offset, uint size, const void *data) {
+	invalidateGeometry(boundBuffer(target));
 	Common::Array<byte> &buffer = _buffers[boundBuffer(target)];
 	if (offset > buffer.size() || size > buffer.size() - offset || (size && !data))
 		error("Grim: native vertex buffer update out of bounds");
@@ -202,9 +208,16 @@ void Context::metalTexImage2D(StateToken target, int level, int internalFormat, 
 		int border, StateToken format, StateToken type, const void *data) {
 	if (level || border || width <= 0 || height <= 0) error("Grim: invalid native texture dimensions");
 	Image &entry = image();
-	Graphics::Surface surface = convertPixels(width, height, format, type, data);
-	Graphics::Metal::Texture *texture = _renderer->createTexture(surface);
-	surface.free();
+	if (!data && entry.texture && entry.texture->width() == uint(width) && entry.texture->height() == uint(height)) return;
+	Graphics::Metal::Texture *texture = nullptr;
+	if (data) {
+		Graphics::Surface surface = convertPixels(width, height, format, type, data);
+		if (entry.texture && entry.texture->width() == uint(width) && entry.texture->height() == uint(height)) {
+			_renderer->updateTexture(*entry.texture, surface, Common::Rect(width, height));
+			surface.free(); return;
+		}
+		texture = _renderer->createTexture(surface); surface.free();
+	} else texture = _renderer->allocateTexture(width, height);
 	if (!texture) error("Grim: native texture allocation failed");
 	delete entry.texture; entry.texture = texture;
 }
@@ -215,13 +228,8 @@ void Context::metalTexSubImage2D(StateToken target, int level, int x, int y, int
 		uint(x + width) > entry.texture->width() || uint(y + height) > entry.texture->height())
 		error("Grim: native texture update out of bounds");
 	Graphics::Surface patch = convertPixels(width, height, format, type, data);
-	// updateTextureLevel interprets the source rect in the same coordinates as the destination.
-	Graphics::Surface canvas;
-	canvas.create(entry.texture->width(), entry.texture->height(), patch.format);
-	for (int row = 0; row < height; ++row)
-		memcpy(canvas.getBasePtr(x, y + row), patch.getBasePtr(0, row), width * 4);
-	_renderer->updateTexture(*entry.texture, canvas, Common::Rect(x, y, x + width, y + height));
-	canvas.free(); patch.free();
+	_renderer->updateTexture(*entry.texture, patch, Common::Rect(width, height), Common::Point(x, y));
+	patch.free();
 }
 void Context::metalCopyTexImage2D(StateToken target, int level, int format, int x, int y, int width, int height, int border) {
 	Image &entry = image();
@@ -290,12 +298,52 @@ void Context::metalVertexAttribPointer(uint location, uint size, StateToken type
 	attribute._normalized = normalized; attribute._stride = stride; attribute._pointer = (uintptr)offset;
 }
 
-void Context::draw(StateToken primitive, const uint32 *indices, uint count) {
-	if (!_shader || !count) return;
-	uint maxIndex = 0;
-	for (uint i = 0; i < count; ++i) maxIndex = MAX(maxIndex, indices[i]);
+void Context::invalidateGeometry(uint32 buffer) {
+	if (!buffer) {
+		for (auto &entry : _indexBuffers) delete entry._value;
+		_indexBuffers.clear();
+	} else if (_indexBuffers.contains(buffer)) {
+		delete _indexBuffers[buffer]; _indexBuffers.erase(buffer);
+	}
+
+	for (uint i = 0; i < _geometry.size();) {
+		bool matches = !buffer;
+		for (const Attribute &attribute : _geometry[i]->attributes)
+			matches |= attribute._enabled && attribute._vbo == buffer;
+		if (matches) { delete _geometry[i]; _geometry.remove_at(i); }
+		else ++i;
+	}
+}
+
+Context::Geometry *Context::geometry(uint minimumCount) {
+	uint vertexCount = ~0U;
+	bool enabled = false;
+	for (const Attribute &attribute : _shader->_attributes) {
+		if (!attribute._enabled) continue;
+		enabled = true;
+		if (!_buffers.contains(attribute._vbo)) error("Grim: native vertex buffer unavailable");
+		const Common::Array<byte> &data = _buffers[attribute._vbo];
+		uint bytes = attribute._type == kFloat ? 4 : 1;
+		uint components = attribute._size * bytes;
+		uint stride = attribute._stride ? attribute._stride : components;
+		if (!attribute._size || attribute._size > 4 || attribute._pointer > data.size() || components > data.size() - attribute._pointer)
+			error("Grim: native vertex attribute out of bounds");
+		vertexCount = MIN(vertexCount, uint((data.size() - attribute._pointer - components) / stride + 1));
+	}
+	if (!enabled) vertexCount = minimumCount;
+	if (minimumCount > vertexCount) error("Grim: native mesh index out of bounds");
+	for (Geometry *entry : _geometry) {
+		bool equal = entry->count == vertexCount;
+		for (uint slot = 0; equal && slot < 4; ++slot) {
+			const Attribute &a = entry->attributes[slot], &b = _shader->_attributes[slot];
+			equal = a._enabled == b._enabled && a._vbo == b._vbo && a._size == b._size &&
+				a._stride == b._stride && a._type == b._type && a._normalized == b._normalized &&
+				a._pointer == b._pointer && !memcmp(a._constant, b._constant, sizeof(a._constant));
+		}
+		if (equal) return entry;
+	}
 	Common::Array<PackedVertex> vertices;
-	vertices.resize(maxIndex + 1);
+	vertices.resize(vertexCount);
 	for (uint vertex = 0; vertex < vertices.size(); ++vertex) {
 		float *attributes[] = {vertices[vertex].position, vertices[vertex].texcoord, vertices[vertex].color, vertices[vertex].normal};
 		for (uint slot = 0; slot < 4; ++slot) {
@@ -316,6 +364,27 @@ void Context::draw(StateToken primitive, const uint32 *indices, uint count) {
 			}
 		}
 	}
+
+	Geometry *entry = new Geometry;
+	for (uint slot = 0; slot < 4; ++slot) entry->attributes[slot] = _shader->_attributes[slot];
+	entry->count = vertexCount;
+	entry->buffer = _renderer->createBuffer(vertices.data(), vertices.size() * sizeof(PackedVertex));
+	if (!entry->buffer) { delete entry; error("Grim: could not allocate persistent geometry"); }
+	// Bound uncommon attribute-layout combinations, retaining in-flight data
+	// through the renderer even when a cache entry is evicted or invalidated.
+	if (_geometry.size() >= 128) { delete _geometry[0]; _geometry.remove_at(0); }
+	_geometry.push_back(entry);
+	return entry;
+}
+
+void Context::draw(StateToken primitive, const uint32 *indices, uint count, Graphics::Metal::Buffer *indexBuffer, uint indexOffset, bool shortIndices, uint firstVertex) {
+	if (!_shader || !count) return;
+	uint maxIndex = firstVertex + count - 1;
+	if (indices) {
+		maxIndex = 0;
+		for (uint i = 0; i < count; ++i) maxIndex = MAX(maxIndex, indices[i]);
+	}
+	Geometry *mesh = geometry(maxIndex + 1);
 	Common::Array<uint32> triangles;
 	if (primitive == kTriangleFan) {
 		for (uint i = 1; i + 1 < count; ++i) {
@@ -334,10 +403,18 @@ void Context::draw(StateToken primitive, const uint32 *indices, uint count) {
 		} else bindings[i].texture = _white;
 	}
 	_shader->_uniforms->nativeParameters[0] = _renderer->height();
-	_renderer->drawProgram(*_shader->_program, vertices.data(), vertices.size(), sizeof(PackedVertex), indices, count,
-		_shader->_uniforms.get(), sizeof(ShaderUniforms), bindings, 2, state);
+	Graphics::Metal::GeometryBinding binding; binding.vertices = mesh->buffer;
+	binding.indices = primitive == kTriangleFan ? nullptr : indexBuffer;
+	binding.indexOffset = indexOffset; binding.indices16 = shortIndices;
+	if (!indices) binding.vertexOffset = firstVertex * sizeof(PackedVertex);
+	_renderer->drawProgram(*_shader->_program, nullptr, indices ? mesh->count : count, sizeof(PackedVertex), indices, indices ? count : 0,
+		_shader->_uniforms.get(), sizeof(ShaderUniforms), bindings, 2, state, nullptr, 0, &binding);
 }
 void Context::metalDrawArrays(StateToken primitive, uint first, uint count) {
+	if (!count) return;
+	if (uint64(first) + count > ~0U) error("Metal: array draw range overflow");
+	if (primitive != kTriangleFan) { draw(primitive, nullptr, count, nullptr, 0, false, first); return; }
+
 	Common::Array<uint32> indices;
 	indices.resize(count);
 	for (uint i = 0; i < count; ++i) indices[i] = first + i;
@@ -346,18 +423,26 @@ void Context::metalDrawArrays(StateToken primitive, uint first, uint count) {
 void Context::metalDrawElements(StateToken primitive, uint count, StateToken type, const void *pointer) {
 	uint bytes = type == kUnsignedShort ? 2 : 4;
 	const byte *data = (const byte *)pointer;
+	Graphics::Metal::Buffer *nativeIndices = nullptr;
 	if (_elementBuffer) {
 		const Common::Array<byte> &buffer = _buffers[_elementBuffer];
 		uintptr offset = (uintptr)pointer;
 		if (offset > buffer.size() || uint64(count) * bytes > buffer.size() - offset)
 			error("Grim: native index buffer out of bounds");
 		data = buffer.data() + offset;
+		if (count && primitive != kTriangleFan) {
+			if (!_indexBuffers.contains(_elementBuffer)) {
+				_indexBuffers[_elementBuffer] = _renderer->createBuffer(buffer.data(), buffer.size());
+				if (!_indexBuffers[_elementBuffer]) error("Metal: could not allocate persistent element buffer");
+			}
+			nativeIndices = _indexBuffers[_elementBuffer];
+		}
 	}
 	if (!data && count) error("Grim: native indices unavailable");
 	Common::Array<uint32> indices;
 	indices.resize(count);
 	for (uint i = 0; i < count; ++i) indices[i] = bytes == 2 ? READ_UINT16(data + i * bytes) : READ_UINT32(data + i * bytes);
-	draw(primitive, indices.data(), count);
+	draw(primitive, indices.data(), count, nativeIndices, _elementBuffer ? (uintptr)pointer : 0, bytes == 2);
 }
 
 void Context::metalCapture(uint32 texture, bool stored, Graphics::Surface &surface) {

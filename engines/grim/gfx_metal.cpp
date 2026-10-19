@@ -2127,7 +2127,7 @@ void GfxMetal::releaseMovieFrame() {
 
 
 const char *GfxMetal::getVideoDeviceName() {
-	return "Apple Silicon Metal 3";
+	return "Apple Silicon Metal 4";
 }
 
 void GfxMetal::renderBitmaps(bool render) {

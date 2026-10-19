@@ -381,7 +381,7 @@ TestExitStatus TinyGLTests::runTexEnvTest(const char *testName, const TextureEnv
 	drawGridQuad(*renderer,nativeColor.get(),0,0); drawGridQuad(*renderer,nativeAlpha.get(),1,0);
 	drawGridQuad(*renderer,tinyColor.get(),0,1); drawGridQuad(*renderer,tinyAlpha.get(),1,1);
 	g_system->updateScreen(); g_system->delayMillis(1000);
-	Common::String question=Common::String::format("Does the top row of images look like the bottom row?\n(Testing Metal 3 / TinyGL: %s)",testName);
+	Common::String question=Common::String::format("Does the top row of images look like the bottom row?\n(Testing Metal 4 / TinyGL: %s)",testName);
 	TestExitStatus status=kTestPassed;
 	if (Testsuite::handleInteractiveInput(question,"Yes","No",kOptionRight)) {
 		Testsuite::logDetailedPrintf("Error! TinyGL and Metal have different texture environment behaviors for %s\n",testName);

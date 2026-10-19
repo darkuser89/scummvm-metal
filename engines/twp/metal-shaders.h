@@ -13,17 +13,16 @@ static const char *const kTwpMetalShaderSource = R"metal(
 using namespace metal;
 struct Light {float4 position, color, cone, falloff;};
 struct Uniforms {
-    float4x4 transform;
     int4 settings;
     float4 effects, ghost;
     float randomValue[8];
     float4 shadows, midtones, highlights, ambient, sprite, sheet;
     float4 hudShadow, hudNormal, hudHighlight, hudRanges;
-    Light lights[50];
 };
+struct VertexUniforms {float4x4 transform;};
 struct Vertex {packed_float2 position; packed_float4 color; packed_float2 uv;};
 struct Varying {float4 position [[position]]; float4 color; float2 uv;};
-vertex Varying twpVertex(uint id [[vertex_id]], const device Vertex *vertices [[buffer(0)]], constant Uniforms &u [[buffer(1)]]) {
+vertex Varying twpVertex(uint id [[vertex_id]], const device Vertex *vertices [[buffer(0)]], constant VertexUniforms &u [[buffer(1)]]) {
     const device Vertex &v = vertices[id];
     Varying result;
     result.position = u.transform * float4(float2(v.position), 0, 1);
@@ -193,7 +192,7 @@ float snoise(float2 v) {
 }
 
 
-fragment float4 twpFragment(Varying in [[stage_in]], constant Uniforms &u [[buffer(1)]],
+fragment float4 twpFragment(Varying in [[stage_in]], constant Uniforms &u [[buffer(1)]], constant Light *lights [[buffer(2)]],
                            texture2d<float> image [[texture(0)]], texture2d<float> image2 [[texture(1)]],
                            sampler filtering [[sampler(0)]], sampler filtering2 [[sampler(1)]]) {
     if (u.settings.x == 2) {
@@ -316,7 +315,7 @@ fragment float4 twpFragment(Varying in [[stage_in]], constant Uniforms &u [[buff
         pixel.y = -pixel.y;
         float3 diffuse = float3(0);
         for (int i = 0; i < min(u.settings.y, 50); ++i) {
-            constant Light &light = u.lights[i];
+            constant Light &light = lights[i];
             float2 lightVec = pixel - light.position.xy;
             float coneValue = dot(normalize(-lightVec), light.cone.xy);
             if (coneValue < light.cone.z) continue;

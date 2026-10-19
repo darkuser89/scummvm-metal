@@ -9,6 +9,7 @@
 #include "hpl1/engine/math/Math.h"
 #include "hpl1/engine/system/String.h"
 #include "common/textconsole.h"
+#include "graphics/metal/shader-source.h"
 
 namespace hpl {
 
@@ -31,7 +32,10 @@ bool MetalGpuProgram::reload() {
 	const MetalShaderSource *vertex = shaderSource(_vertex, "vertex"), *fragment = shaderSource(_fragment, "fragment");
 	if (!vertex || !fragment) return false;
 	tString source(kMetalShaderPrelude);
-	source += vertex->source; source += fragment->source;
+	Common::String vertexOverride = Graphics::Metal::shaderOverride("hpl1", (Common::String(vertex->name) + ".vertex").c_str());
+	Common::String fragmentOverride = Graphics::Metal::shaderOverride("hpl1", (Common::String(fragment->name) + ".fragment").c_str());
+	source += vertexOverride.empty() ? vertex->source : vertexOverride.c_str();
+	source += fragmentOverride.empty() ? fragment->source : fragmentOverride.c_str();
 	Graphics::Metal::Program *program = _graphics->metal().createProgram(source.c_str(), vertex->entry, fragment->entry);
 	if (!program) return false;
 	delete _program; _program = program;

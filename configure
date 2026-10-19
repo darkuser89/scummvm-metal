@@ -338,7 +338,7 @@ add_feature jpeg "JPEG" "_jpeg"
 add_feature mad "MAD" "_mad"
 add_feature opengl_game_classic "OpenGL (classic)" "_opengl_game_classic"
 add_feature opengl_game_shaders "OpenGL with shaders" "_opengl_game_shaders"
-add_feature metal "Metal 3" "_metal"
+add_feature metal "Metal 4" "_metal"
 add_feature game_shaders "Game rendering with shaders" "_opengl_game_shaders _metal"
 add_feature game_classic "Classic game rendering" "_opengl_game_classic _metal"
 add_feature png "PNG" "_png"
@@ -1078,8 +1078,8 @@ Optional Features:
   --enable-tts             build support for text to speech
   --disable-tts            don't build support for text to speech
   --disable-bink           don't build with Bink video support
-  --enable-metal          build native Metal 3 output (macOS 13+, arm64, SDL2)
-  --disable-metal         don't build native Metal 3 output
+  --enable-metal          build native Metal 4 output (macOS 26+, arm64, SDL2)
+  --disable-metal         don't build native Metal 4 output
   --opengl-mode=MODE       OpenGL (ES) mode to use for OpenGL output [auto]
                            available modes: auto for autodetection
                                             none for disabling any OpenGL usage
@@ -6818,7 +6818,7 @@ echo "$_freetype2"
 
 define_in_config_if_yes "$_freetype2" "USE_FREETYPE2"
 
-# Native Metal 3 is restricted to macOS on Apple Silicon with SDL 2.0.14+.
+# Native Metal 4 is restricted to macOS on Apple Silicon with SDL 2.0.14+.
 _metal_requested=$_metal
 if test "$_metal" != no; then
 	_metal=no
@@ -6827,8 +6827,8 @@ if test "$_metal" != no; then
 		cat > $TMPC << EOF
 #include <AvailabilityMacros.h>
 #include <SDL.h>
-#if !defined(__arm64__) || MAC_OS_X_VERSION_MAX_ALLOWED < 130000
-#error Metal 3 requires an arm64 macOS 13 SDK or later
+#if !defined(__arm64__) || MAC_OS_X_VERSION_MAX_ALLOWED < 260000
+#error Metal 4 requires an arm64 macOS 26 SDK or later
 #endif
 #if !SDL_VERSION_ATLEAST(2, 0, 14)
 #error Metal output requires SDL 2.0.14 or later
@@ -6865,19 +6865,19 @@ EOF
 			_metal=yes
 			append_var INCLUDES "$METAL_SHADER_CFLAGS"
 			append_var LIBS "$METAL_SHADER_LIBS"
-			append_var CXXFLAGS "-mmacosx-version-min=13.0"
-			append_var LDFLAGS "-mmacosx-version-min=13.0"
+			append_var CXXFLAGS "-mmacosx-version-min=26.0"
+			append_var LDFLAGS "-mmacosx-version-min=26.0"
 			append_var LIBS "-framework Metal -framework MetalFX -framework QuartzCore"
 			append_var LIBS_3D "-framework Metal -framework MetalFX -framework QuartzCore"
 		fi
 		;;
 	esac
 	if test "$_metal_requested" = yes -a "$_metal" != yes; then
-		echo "Metal 3 requires macOS 13+, an arm64 target and SDL 2.0.14+"
+		echo "Metal 4 requires macOS 26+, an arm64 target and SDL 2.0.14+"
 		exit 1
 	fi
 fi
-echocheck "Metal 3 (Apple M1-M6)"
+echocheck "Metal 4 (Apple M1-M6)"
 echo "$_metal"
 define_in_config_if_yes "$_metal" "USE_METAL"
 

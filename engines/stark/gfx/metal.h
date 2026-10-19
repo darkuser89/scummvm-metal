@@ -22,10 +22,14 @@ struct MetalUniforms {
 	float modelView[16], projection[16], normal[16];
 	MetalLight lights[10];
 	float boneRotation[70][4], bonePosition[70][4];
-	float ambient[4], color[4], shadowDirection[4];
-	uint32 textured, doubleSided;
-	float fadeLevel;
-	uint32 padding;
+	float ambient[4];
+};
+
+struct MetalMaterialUniforms {
+	float color[4] = {1, 1, 1, 1}, shadowDirection[4] = {};
+	uint32 textured = 0, doubleSided = 0;
+	float fadeLevel = 0;
+	uint32 padding = 0;
 };
 
 class MetalDriver : public Driver {

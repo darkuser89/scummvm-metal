@@ -30,6 +30,7 @@
 
 #include "common/scummsys.h"
 #include "hpl1/engine/graphics/VertexBuffer.h"
+#include "graphics/metal/renderer.h"
 
 
 
@@ -89,6 +90,8 @@ private:
 
 
 	bool mbHasShadowDouble;
+	Graphics::Metal::Buffer *_vertices = nullptr, *_indices = nullptr;
+	bool _verticesDirty = true, _indicesDirty = true;
 };
 
 } // namespace hpl

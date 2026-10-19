@@ -11,6 +11,7 @@
 #include "common/system.h"
 #include "common/textconsole.h"
 #include "graphics/metal/renderer.h"
+#include "graphics/metal/geometry.h"
 #include "math/glmath.h"
 
 namespace Freescape {
@@ -37,7 +38,7 @@ private:
 class MetalRenderer : public Renderer {
 public:
 	MetalRenderer(int w, int h, Common::RenderMode mode, bool authentic) : Renderer(w, h, mode, authentic),
-		_metal(g_system->getMetalRenderer()), _stippled(false) {
+		_metal(g_system->getMetalRenderer()), _geometry(_metal), _stippled(false) {
 		if (!_metal)
 			error("Freescape: Metal backend is unavailable");
 		_texturePixelFormat = getRGBAPixelFormat();
@@ -148,7 +149,7 @@ public:
 		Graphics::Metal::DrawState state = screenState();
 		state.primitive = Graphics::Metal::kTriangleStrip;
 		state.blend = true;
-		_metal->draw(vertices, 4, static_cast<MetalTexture *>(texture)->texture, state, uniforms2D());
+		_geometry.draw(vertices, 4, static_cast<MetalTexture *>(texture)->texture, state, uniforms2D());
 	}
 	void renderSensorShoot(byte color, const Math::Vector3d sensor, const Math::Vector3d player, const Common::Rect &viewArea) override {
 		Graphics::Metal::DrawState state = _state;
@@ -230,7 +231,7 @@ public:
 		}
 		Graphics::Metal::DrawState state = _state;
 		state.cull = false; state.depthWrite = false; state.wrapS = Graphics::Metal::kRepeat;
-		_metal->drawIndexed(vertices, 16, indices, 24, static_cast<MetalTexture *>(texture)->texture, state, uniforms);
+		_geometry.draw(vertices, 16, static_cast<MetalTexture *>(texture)->texture, state, uniforms, indices, 24);
 	}
 	void drawThunder(Texture *texture, Math::Vector3d position, float size) override {
 		const float *mv = _modelViewMatrix.getData();
@@ -251,7 +252,7 @@ public:
 		Graphics::Metal::DrawState state = _state;
 		state.cull = false; state.blend = true; state.srcRGB = state.srcAlpha = state.dstRGB = state.dstAlpha = Graphics::Metal::kBlendOne;
 		state.primitive = Graphics::Metal::kTriangleStrip;
-		_metal->draw(vertices, 4, static_cast<MetalTexture *>(texture)->texture, state, uniforms);
+		_geometry.draw(vertices, 4, static_cast<MetalTexture *>(texture)->texture, state, uniforms);
 	}
 	void drawCelestialBody(Math::Vector3d position, float radius, uint8 color) override {
 		uint8 r1, g1, b1, r2, g2, b2; byte *stipple;
@@ -282,6 +283,26 @@ public:
 			drawFan(points, state, uniforms);
 		}
 	}
+	void drawAABB(const Math::AABB &box, uint8 r, uint8 g, uint8 b) override {
+		if (!box.isValid()) return;
+		Math::Vector3d minimum = box.getMin(), maximum = box.getMax();
+		Math::Vector3d corners[8];
+		for (uint i = 0; i < 8; ++i)
+			corners[i] = Math::Vector3d(i & 1 ? maximum.x() : minimum.x(), i & 2 ? maximum.y() : minimum.y(), i & 4 ? maximum.z() : minimum.z());
+		Graphics::Metal::DrawState state = _state;
+		state.depthTest = state.depthWrite = state.cull = state.wireframe = false;
+		Graphics::Metal::Uniforms uniforms = uniforms3D(); uniforms.stippled = false;
+		for (uint i = 0; i < 8; ++i) {
+			for (uint bit = 1; bit <= 4; bit <<= 1) {
+				if (i & bit) continue;
+				Graphics::Metal::Vertex start = vertex(corners[i]), end = vertex(corners[i | bit]);
+				start.color[0] = end.color[0] = r / 255.f; start.color[1] = end.color[1] = g / 255.f;
+				start.color[2] = end.color[2] = b / 255.f; start.color[3] = end.color[3] = 1;
+				_metal->drawWideLine(start, end, 2, state, uniforms);
+			}
+		}
+	}
+
 	Graphics::Surface *getScreenshot() override {
 		Graphics::Surface *surface = new Graphics::Surface;
 		if (!_metal->readPixels(*surface, _screenViewport)) {
@@ -293,6 +314,7 @@ public:
 
 private:
 	Graphics::Metal::Renderer *_metal;
+	Graphics::Metal::GeometryCache _geometry;
 	Graphics::Metal::DrawState _state;
 	float _color[4];
 	bool _stippled;
@@ -357,7 +379,7 @@ private:
 		for (uint i = 1; i + 1 < points.size(); ++i) {
 			vertices.push_back(vertex(points[0])); vertices.push_back(vertex(points[i])); vertices.push_back(vertex(points[i + 1]));
 		}
-		_metal->draw(vertices.data(), vertices.size(), nullptr, state, uniforms);
+		_geometry.draw(vertices.data(), vertices.size(), nullptr, state, uniforms);
 	}
 };
 

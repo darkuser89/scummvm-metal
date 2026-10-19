@@ -186,6 +186,17 @@ private:
 	};
 	Common::HashMap<uint32, Image> _images;
 	Common::HashMap<uint32, Common::Array<byte> > _buffers;
+	struct Geometry {
+		Attribute attributes[4];
+		Graphics::Metal::Buffer *buffer = nullptr;
+		uint count = 0;
+		~Geometry() { delete buffer; }
+	};
+	Common::Array<Geometry *> _geometry;
+	Common::HashMap<uint32, Graphics::Metal::Buffer *> _indexBuffers;
+	void invalidateGeometry(uint32 buffer = 0);
+	Geometry *geometry(uint minimumCount);
+
 	uint32 _nextBuffer = 1, _nextImage = 1;
 	uint32 _arrayBuffer = 0, _elementBuffer = 0, _boundImages[2] = {};
 	uint _activeUnit = 0, _unpackAlignment = 4;
@@ -195,7 +206,7 @@ private:
 	Graphics::Metal::DrawState _drawState;
 	Image &image();
 	uint32 boundBuffer(StateToken target) const;
-	void draw(StateToken primitive, const uint32 *indices, uint count);
+	void draw(StateToken primitive, const uint32 *indices, uint count, Graphics::Metal::Buffer *indexBuffer = nullptr, uint indexOffset = 0, bool shortIndices = false, uint firstVertex = 0);
 	Graphics::Surface convertPixels(uint width, uint height, StateToken format, StateToken type, const void *pixels) const;
 };
 

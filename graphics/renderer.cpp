@@ -30,7 +30,7 @@ namespace Graphics {
 
 static const RendererTypeDescription rendererTypes[] = {
 #ifdef USE_METAL
-	{ "metal", "Metal 3", kRendererTypeMetal },
+	{ "metal", "Metal 4", kRendererTypeMetal },
 #endif
 #if defined(USE_OPENGL_GAME)
 	{ "opengl", _s("OpenGL"), kRendererTypeOpenGL },

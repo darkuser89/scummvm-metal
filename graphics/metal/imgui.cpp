@@ -12,9 +12,9 @@
 namespace Graphics {
 namespace Metal {
 
-ImGuiRenderer::ImGuiRenderer(Renderer &renderer) : _renderer(renderer) {
+ImGuiRenderer::ImGuiRenderer(Renderer &renderer) : _renderer(renderer), _program(createProgram(renderer)) {
 	ImGuiIO &io = ImGui::GetIO();
-	io.BackendRendererName = "scummvm_metal3";
+	io.BackendRendererName = "scummvm_metal4";
 	io.BackendRendererUserData = this;
 	io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset | ImGuiBackendFlags_RendererHasTextures | ImGuiBackendFlags_RendererHasViewports;
 	io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
@@ -31,6 +31,7 @@ ImGuiRenderer::~ImGuiRenderer() {
 	ImGui::DestroyPlatformWindows();
 	ImGui::GetPlatformIO().ClearRendererHandlers();
 	_renderer.flush(true);
+	delete _program;
 	for (ImTextureData *texture : ImGui::GetPlatformIO().Textures) {
 		if (texture->BackendUserData && texture->RefCount == 1) {
 			delete static_cast<Texture *>(texture->BackendUserData);
@@ -90,10 +91,34 @@ void ImGuiRenderer::render(ImDrawData *data) {
 		for (ImTextureData *texture : *data->Textures)
 			if (texture->Status != ImTextureStatus_OK)
 				updateTexture(*texture);
-	renderDrawData(_renderer, data);
+	renderDrawData(_renderer, data, *_program);
 }
 
-void ImGuiRenderer::renderDrawData(Renderer &renderer, ImDrawData *data) {
+Program *ImGuiRenderer::createProgram(Renderer &renderer) {
+	static_assert(sizeof(ImDrawIdx) == 2 || sizeof(ImDrawIdx) == 4, "Unsupported ImGui index width");
+	Common::String source = Common::String::format(R"metal(
+#include <metal_stdlib>
+using namespace metal;
+struct Input { float2 position [[attribute(0)]]; float2 uv [[attribute(1)]]; float4 color [[attribute(2)]]; };
+struct Output { float4 position [[position]]; float2 uv; float4 color; };
+vertex Output imguiVertex(Input in [[stage_in]], constant float4x4 &matrix [[buffer(1)]]) {
+ Output o; o.position=matrix*float4(in.position,0,1); o.uv=in.uv;
+ o.color=float4(in.color[%u],in.color[%u],in.color[%u],in.color[%u]); return o;
+}
+fragment float4 imguiFragment(Output in [[stage_in]], texture2d<float> image [[texture(0)]], sampler filtering [[sampler(0)]]) {
+ return in.color*image.sample(filtering,in.uv);
+}
+)metal", IM_COL32_R_SHIFT / 8, IM_COL32_G_SHIFT / 8, IM_COL32_B_SHIFT / 8, IM_COL32_A_SHIFT / 8);
+	VertexAttribute attributes[3];
+	attributes[0].index = 0; attributes[0].offset = offsetof(ImDrawVert, pos); attributes[0].components = 2;
+	attributes[1].index = 1; attributes[1].offset = offsetof(ImDrawVert, uv); attributes[1].components = 2;
+	attributes[2].index = 2; attributes[2].offset = offsetof(ImDrawVert, col); attributes[2].components = 4; attributes[2].type = VertexAttribute::kUNorm8;
+	Program *program = renderer.createProgram(source.c_str(), "imguiVertex", "imguiFragment", attributes, 3, sizeof(ImDrawVert));
+	if (!program) error("Metal: could not create native ImGui program");
+	return program;
+}
+
+void ImGuiRenderer::renderDrawData(Renderer &renderer, ImDrawData *data, Program &program) {
 	if (data->DisplaySize.x <= 0 || data->DisplaySize.y <= 0)
 		return;
 	const int width = renderer.width(), height = renderer.height();
@@ -107,19 +132,15 @@ void ImGuiRenderer::renderDrawData(Renderer &renderer, ImDrawData *data) {
 	DrawState state;
 	state.blend = true;
 	state.scissor = true;
+	Buffer *matrix = renderer.createTransientBuffer(uniforms.transform, sizeof(uniforms.transform));
+	if (!matrix) error("Metal: could not upload ImGui projection");
+	UniformBindings constants; constants.vertex = matrix;
 	float scaleX = width / data->DisplaySize.x, scaleY = height / data->DisplaySize.y;
 	for (const ImDrawList *list : data->CmdLists) {
-		Common::Array<Vertex> vertices;
-		vertices.resize(list->VtxBuffer.Size);
-		for (int i = 0; i < list->VtxBuffer.Size; ++i) {
-			const ImDrawVert &v = list->VtxBuffer[i];
-			Vertex &out = vertices[i];
-			out.position[0] = v.pos.x; out.position[1] = v.pos.y; out.position[2] = 0;
-			out.texcoord[0] = v.uv.x; out.texcoord[1] = v.uv.y;
-			out.color[0] = ((v.col >> IM_COL32_R_SHIFT) & 255) / 255.0f;
-			out.color[1] = ((v.col >> IM_COL32_G_SHIFT) & 255) / 255.0f;
-			out.color[2] = ((v.col >> IM_COL32_B_SHIFT) & 255) / 255.0f;
-			out.color[3] = ((v.col >> IM_COL32_A_SHIFT) & 255) / 255.0f;
+		Buffer *vertices = list->VtxBuffer.Size > 0 ? renderer.createTransientBuffer(list->VtxBuffer.Data, list->VtxBuffer.Size * sizeof(ImDrawVert)) : nullptr;
+		Buffer *indices = list->IdxBuffer.Size > 0 ? renderer.createTransientBuffer(list->IdxBuffer.Data, list->IdxBuffer.Size * sizeof(ImDrawIdx)) : nullptr;
+		if ((list->VtxBuffer.Size > 0 && !vertices) || (list->IdxBuffer.Size > 0 && !indices)) {
+			delete vertices; delete indices; error("Metal: could not upload ImGui draw list");
 		}
 		for (const ImDrawCmd &command : list->CmdBuffer) {
 			if (command.UserCallback) {
@@ -136,23 +157,35 @@ void ImGuiRenderer::renderDrawData(Renderer &renderer, ImDrawData *data) {
 			if (clip.isEmpty() || !command.ElemCount)
 				continue;
 			state.scissorRect = clip;
-			Common::Array<uint32> indices;
-			indices.resize(command.ElemCount);
+			if (command.VtxOffset >= uint(list->VtxBuffer.Size) || command.IdxOffset > uint(list->IdxBuffer.Size) ||
+			    command.ElemCount > uint(list->IdxBuffer.Size) - command.IdxOffset)
+				error("Metal: ImGui draw range out of bounds");
 			for (uint i = 0; i < command.ElemCount; ++i)
-				indices[i] = list->IdxBuffer[command.IdxOffset + i] + command.VtxOffset;
-			Texture *texture = (Texture *)(uintptr)command.GetTexID();
-			renderer.drawIndexed(vertices.data(), vertices.size(), indices.data(), indices.size(), texture, state, uniforms);
+				if (uint64(list->IdxBuffer[command.IdxOffset + i]) + command.VtxOffset >= uint(list->VtxBuffer.Size))
+					error("Metal: ImGui vertex index out of bounds");
+			GeometryBinding geometry;
+			geometry.vertices = vertices; geometry.indices = indices;
+			geometry.vertexOffset = command.VtxOffset * sizeof(ImDrawVert);
+			geometry.indexOffset = command.IdxOffset * sizeof(ImDrawIdx);
+			geometry.indices16 = sizeof(ImDrawIdx) == 2;
+			TextureBinding texture; texture.texture = (Texture *)(uintptr)command.GetTexID(); texture.mipmaps = false;
+			renderer.drawProgram(program, nullptr, list->VtxBuffer.Size - command.VtxOffset, sizeof(ImDrawVert), nullptr,
+				command.ElemCount, nullptr, 0, &texture, 1, state, nullptr, 0, &geometry, &constants);
 		}
+		delete vertices; delete indices;
 	}
+	delete matrix;
 	renderer.setViewport(previousViewport);
 }
 
 
 struct ViewportData {
 	Renderer renderer;
+	Program *program = nullptr;
 	SDL_MetalView view = nullptr;
 	SDL_Window *window = nullptr;
 	~ViewportData() {
+		delete program;
 		renderer.detach();
 		if (view) SDL_Metal_DestroyView(view);
 	}
@@ -167,6 +200,7 @@ void ImGuiRenderer::createWindow(ImGuiViewport *viewport) {
 		delete data;
 		error("Metal: could not initialize ImGui platform window");
 	}
+	data->program = createProgram(data->renderer);
 	viewport->RendererUserData = data;
 	resizeWindow(viewport, viewport->Size);
 }
@@ -184,7 +218,7 @@ void ImGuiRenderer::resizeWindow(ImGuiViewport *viewport, ImVec2) {
 	if (width > 0 && height > 0 &&
 	    (data->renderer.width() != (uint)width || data->renderer.height() != (uint)height)) {
 		debug(2, "Metal ImGui viewport: logical %.0fx%.0f, drawable %dx%d", viewport->Size.x, viewport->Size.y, width, height);
-		if (!data->renderer.resize(width, height)) error("Metal: could not resize ImGui platform window");
+		if (!data->renderer.resize(width, height, 1, false)) error("Metal: could not resize ImGui platform window");
 	}
 }
 
@@ -198,14 +232,24 @@ void ImGuiRenderer::renderWindow(ImGuiViewport *viewport, void *) {
 			if (texture->Status != ImTextureStatus_OK) main->updateTexture(*texture);
 	// Atlas and engine-texture writes on the shared device finish before the
 	// secondary queue samples those resources.
-	main->_renderer.flush(true);
+	data->renderer.waitFor(main->_renderer);
 	if (!(viewport->Flags & ImGuiViewportFlags_NoRendererClear)) data->renderer.clear(0, 0, 0, 1);
-	main->renderDrawData(data->renderer, viewport->DrawData);
+	main->renderDrawData(data->renderer, viewport->DrawData, *data->program);
 }
 
 void ImGuiRenderer::presentWindow(ImGuiViewport *viewport, void *) {
 	ViewportData *data = static_cast<ViewportData *>(viewport->RendererUserData);
 	if (data) data->renderer.present();
+}
+
+void ImGuiRenderer::finishPlatformWindows() {
+	// Join only after all secondary queues have been scheduled. They can read
+	// the shared atlas concurrently; subsequent main-queue writes/frees wait
+	// for those reads without blocking the CPU at every viewport.
+	for (ImGuiViewport *viewport : ImGui::GetPlatformIO().Viewports) {
+		ViewportData *data = static_cast<ViewportData *>(viewport->RendererUserData);
+		if (data) _renderer.waitFor(data->renderer);
+	}
 }
 
 } // End of namespace Metal

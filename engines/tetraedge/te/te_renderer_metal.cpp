@@ -45,6 +45,7 @@ TeRendererMetal::TeRendererMetal() {}
 TeRendererMetal::~TeRendererMetal() {
 	if (_metal) { _metal->setRenderTarget(nullptr); _metal->flush(true); }
 	delete _program;
+	delete _pointProgram;
 }
 
 void TeRendererMetal::init(uint width, uint height) {
@@ -52,7 +53,8 @@ void TeRendererMetal::init(uint width, uint height) {
 	_metal = g_system->getMetalRenderer();
 	if (!_metal) error("Tetraedge: no Metal backend");
 	_program = _metal->createProgram(kTeMetalShaderSource,"teVertex","teFragment");
-	if (!_program) error("Tetraedge: could not create Metal programs");
+	_pointProgram = _metal->createProgram(kTeMetalShaderSource,"tePointVertex","teFragment");
+	if (!_program || !_pointProgram) error("Tetraedge: could not create Metal programs");
 	_state.blend = true; _state.depthTest = _state.depthWrite = true;
 	_state.depthCompare = Metal::kLessEqual;
 	_currentColor = TeColor(255,255,255,255); _clearColor = TeColor(0,0,0,255);
@@ -214,7 +216,7 @@ void TeRendererMetal::draw(const TeMetalVertex *vertices,uint count,const uint32
 			indices = converted.data(); indexCount = converted.size();
 		}
 	}
-	_metal->drawProgram(*_program,vertices,count,sizeof(TeMetalVertex),indices,indexCount,&_uniforms,sizeof(_uniforms),&binding,1,state);
+	_metal->drawProgram(*(state.primitive == Metal::kPoints ? _pointProgram : _program),vertices,count,sizeof(TeMetalVertex),indices,indexCount,&_uniforms,sizeof(_uniforms),&binding,1,state);
 }
 
 void TeRendererMetal::renderTransparentMeshes() {

@@ -51,6 +51,13 @@ public:
 	void setUniformInt(const Common::String &name, uint32 value) { setUniformValues(name, nullptr, &value, 1); }
 	bool hasUniform(const Common::String &name) const;
 private:
+	struct UniformBinding {
+		uint index = 0;
+		Common::Array<uint> flags;
+	};
+	mutable Common::HashMap<Common::String, Common::Array<UniformBinding> > _uniformBindings;
+	mutable uint _preparedUniformCount = ~0U;
+	void prepareUniformBindings() const;
 	void setUniformValues(const Common::String &name, const float *values, const uint32 *integers, uint count);
 };
 

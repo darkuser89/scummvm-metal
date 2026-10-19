@@ -35,6 +35,26 @@ public:
 	void showOverlay(bool inGUI) override;
 	void hideOverlay() override;
 	void clearOverlay() override;
+	Graphics::PixelFormat getOverlayFormat() const override { return Graphics::PixelFormat::createFormatRGBA32(); }
+	void copyRectToScreen(const void *buf, int pitch, int x, int y, int w, int h) override {
+		SurfaceSdlGraphicsManager::copyRectToScreen(buf, pitch, x, y, w, h); ++_gameSourceVersion;
+	}
+	void unlockScreen() override { SurfaceSdlGraphicsManager::unlockScreen(); ++_gameSourceVersion; }
+	void fillScreen(uint32 color) override { SurfaceSdlGraphicsManager::fillScreen(color); ++_gameSourceVersion; }
+	void fillScreen(const Common::Rect &rect, uint32 color) override { SurfaceSdlGraphicsManager::fillScreen(rect, color); ++_gameSourceVersion; }
+	void setPalette(const byte *colors, uint start, uint num) override {
+		SurfaceSdlGraphicsManager::setPalette(colors, start, num); ++_gameSourceVersion;
+	}
+#ifdef USE_OSD
+	void displayMessageOnOSD(const Common::U32String &message) override {
+		SurfaceSdlGraphicsManager::displayMessageOnOSD(message); _messageTextureDirty = true;
+	}
+	void displayActivityIconOnOSD(const Graphics::Surface *icon) override {
+		SurfaceSdlGraphicsManager::displayActivityIconOnOSD(icon); _iconTextureDirty = true;
+	}
+#endif
+	void setMouseCursor(const void *buf, uint w, uint h, int hotspotX, int hotspotY, uint32 keycolor,
+	                    const Graphics::PixelFormat *format, const byte *mask, frac_t scaleX, frac_t scaleY) override;
 	Graphics::Metal::Renderer *getMetalRenderer() override { return &_metal; }
 	void notifyResize(int width, int height) override;
 	void destroyingWindow() override;
@@ -51,6 +71,10 @@ protected:
 	void internUpdateScreen() override;
 	SDL_Surface *createOffscreenSurface(int width, int height) override;
 	bool needsDisplayUpdate() const override { return _composition != nullptr; }
+	void drawMouse() override {}
+#ifdef USE_OSD
+	void drawOSD() override {}
+#endif
 #ifdef USE_IMGUI
 	bool initMetalImGui() override;
 	void renderMetalImGui() override;
@@ -68,6 +92,9 @@ private:
 	Graphics::Surface _scaledFrame;
 	Graphics::Metal::RenderTarget *_composition;
 	Graphics::Metal::Texture *_cursorTexture;
+	Graphics::Metal::Texture *_cursorInvertTexture = nullptr;
+	Graphics::Surface _cursorInvertSurface;
+	Common::Array<byte> _indexedCursor, _indexedCursorMask;
 	bool _cursorTextureDirty;
 	Graphics::Metal::Texture *_gameTexture = nullptr;
 	Graphics::Metal::Texture *_scaledGameTexture = nullptr;
@@ -79,21 +106,33 @@ private:
 	Graphics::Metal::RenderTarget *_shaderInput = nullptr;
 	Common::Path _shaderPath, _oldShaderPath;
 	bool _shaderCursorComposed = false;
+	bool _windowGeometryChanged = false;
+	Graphics::Metal::Texture *_overlayTexture = nullptr;
+	uint64 _gameSourceVersion = 1, _uploadedGameVersion = 0;
+#ifdef USE_OSD
+	Graphics::Metal::Texture *_messageTexture = nullptr, *_iconTexture = nullptr;
+	bool _messageTextureDirty = true, _iconTextureDirty = true;
+#endif
 #ifdef USE_IMGUI
 	Graphics::Metal::ImGuiRenderer *_imGuiMetal = nullptr;
 #endif
 	void captureGameFrame();
 	void releaseRenderResources();
+	void rememberWindowSize();
 	void gameRenderSize(uint &width, uint &height) const;
 	void drawNative2D();
+	Graphics::Metal::Texture *prepareGameTexture(bool force = false);
+	Graphics::Metal::Texture *prepareCpuScaledTexture(bool force);
+	bool redrawRequired();
+	void drawOverlay();
 	void drawInterface();
-	void drawCursor(const Common::Rect *shaderRect = nullptr);
+	void drawCursor(const Common::Rect *shaderRect = nullptr, bool invertOnly = false);
 	void drawGameTexture(Graphics::Metal::Texture *texture, const Common::Rect &rect);
 	bool loadShader();
 	void blitCursor() override;
-	Graphics::Metal::Texture *textureFromSurface(SDL_Surface *surface);
+	Graphics::Metal::Texture *textureFromSurface(SDL_Surface *surface, Graphics::Metal::Texture *reuse = nullptr);
 	Common::Rect mapScreenRect(const Common::Rect &source) const;
-	void drawTexture(Graphics::Metal::Texture *texture, const Common::Rect &rect, bool linear, bool blend, float alpha = 1, bool rotate = true);
+	void drawTexture(Graphics::Metal::Texture *texture, const Common::Rect &rect, bool linear, bool blend, float alpha = 1, bool rotate = true, bool invert = false);
 };
 
 #endif

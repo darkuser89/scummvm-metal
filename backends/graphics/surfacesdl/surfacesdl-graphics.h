@@ -140,6 +140,7 @@ public:
 
 protected:
 	void restoreScalerSourceAfterOverlay();
+	bool scalerSourceNeedsRestore() const { return _needRestoreAfterOverlay; }
 #ifdef USE_OSD
 	/** Surface containing the OSD message */
 	SDL_Surface *_osdMessageSurface;
@@ -163,7 +164,7 @@ protected:
 	SDL_Rect getOSDIconRect() const;
 
 	void updateOSD();
-	void drawOSD();
+	virtual void drawOSD();
 #endif
 
 	class AspectRatio {

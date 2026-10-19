@@ -25,16 +25,14 @@ struct Varying {
     float4 uv;
     float4 color;
     float4 flatColor [[flat]];
-    float pointSize [[point_size]];
 };
-vertex Varying teVertex(uint id [[vertex_id]], const device Vertex *vertices [[buffer(0)]], constant Uniforms &u [[buffer(1)]]) {
+Varying teTransform(uint id, const device Vertex *vertices, constant Uniforms &u) {
     const device Vertex &v = vertices[id];
     float4 eye = u.modelView * float4(float3(v.position), 1);
     Varying result;
     result.position = u.projection * eye;
     result.position.z = (result.position.z + result.position.w) * 0.5;
     result.uv = u.projected ? u.projectedTexture * eye : u.texture * float4(float2(v.uv), 0, 1);
-    result.pointSize = 1;
     result.color = float4(v.color);
     if (u.lighting) {
         float3 n = (u.normal * float4(float3(v.normal), 0)).xyz;
@@ -59,6 +57,21 @@ vertex Varying teVertex(uint id [[vertex_id]], const device Vertex *vertices [[b
     }
     result.flatColor = result.color;
     return result;
+}
+// Metal 4 requires point-size output only for point topology. Keep lighting
+// and transformation shared while exposing separate primitive entry points.
+vertex Varying teVertex(uint id [[vertex_id]], const device Vertex *vertices [[buffer(0)]], constant Uniforms &u [[buffer(1)]]) {
+    return teTransform(id, vertices, u);
+}
+struct PointVarying {
+    float4 position [[position]];
+    float4 uv, color;
+    float4 flatColor [[flat]];
+    float pointSize [[point_size]];
+};
+vertex PointVarying tePointVertex(uint id [[vertex_id]], const device Vertex *vertices [[buffer(0)]], constant Uniforms &u [[buffer(1)]]) {
+    Varying v = teTransform(id, vertices, u);
+    return {v.position, v.uv, v.color, v.flatColor, 1};
 }
 fragment float4 teFragment(Varying in [[stage_in]], constant Uniforms &u [[buffer(1)]], texture2d<float> image [[texture(0)]], sampler filtering [[sampler(0)]]) {
     float4 color = u.materialParameters.z != 0 ? in.flatColor : in.color;

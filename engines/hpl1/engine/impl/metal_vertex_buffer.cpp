@@ -66,6 +66,7 @@ MetalVertexBuffer::MetalVertexBuffer(iLowLevelGraphics *apLowLevelGraphics, tVer
 }
 
 MetalVertexBuffer::~MetalVertexBuffer() {
+	delete _vertices; delete _indices;
 	for (int i = 0; i < klNumOfVertexFlags; i++)
 		mvVertexArray[i].clear();
 
@@ -81,6 +82,7 @@ MetalVertexBuffer::~MetalVertexBuffer() {
 //-----------------------------------------------------------------------
 
 void MetalVertexBuffer::AddVertex(tVertexFlag aType, const cVector3f &avVtx) {
+	_verticesDirty = true;
 	int idx = cMath::Log2ToInt((int)aType);
 
 	mvVertexArray[idx].push_back(avVtx.x);
@@ -93,6 +95,7 @@ void MetalVertexBuffer::AddVertex(tVertexFlag aType, const cVector3f &avVtx) {
 //-----------------------------------------------------------------------
 
 void MetalVertexBuffer::AddColor(tVertexFlag aType, const cColor &aColor) {
+	_verticesDirty = true;
 	int idx = cMath::Log2ToInt((int)aType);
 
 	mvVertexArray[idx].push_back(aColor.r);
@@ -104,12 +107,14 @@ void MetalVertexBuffer::AddColor(tVertexFlag aType, const cColor &aColor) {
 //-----------------------------------------------------------------------
 
 void MetalVertexBuffer::AddIndex(unsigned int alIndex) {
+	_indicesDirty = true;
 	mvIndexArray.push_back(alIndex);
 }
 
 //-----------------------------------------------------------------------
 
 bool MetalVertexBuffer::Compile(tVertexCompileFlag aFlags) {
+	_verticesDirty = _indicesDirty = true;
 	if (aFlags & eVertexCompileFlag_CreateTangents) {
 		int vertexCount = GetVertexNum();
 		if (vertexCount <= 0 || GetIndexNum() < 3 || GetIndexNum() % 3 ||
@@ -141,11 +146,14 @@ bool MetalVertexBuffer::Compile(tVertexCompileFlag aFlags) {
 //-----------------------------------------------------------------------
 
 void MetalVertexBuffer::UpdateData(tVertexFlag aTypes, bool abIndices) {
+	_verticesDirty |= aTypes != 0;
+	_indicesDirty |= abIndices;
 }
 
 //-----------------------------------------------------------------------
 
 void MetalVertexBuffer::CreateShadowDouble(bool abUpdateData) {
+	_verticesDirty = true;
 	int lIdx = cMath::Log2ToInt(eVertexFlag_Position);
 
 	// Set to new size.
@@ -237,25 +245,46 @@ void MetalVertexBuffer::DrawIndices(unsigned int *apIndices, int alCount,
 								   eVertexBufferDrawType aDrawType) {
 	if (!apIndices || alCount <= 0) return;
 	uint count = mvVertexArray[1].size() / 4;
+	if (_vertices && _vertices->size() / sizeof(MetalShaderVertex) != count) _indicesDirty = true;
 	Common::Array<MetalShaderVertex> vertices;
-	vertices.resize(count);
-	for (uint i = 0; i < count; ++i) {
-		MetalShaderVertex &vertex = vertices[i];
-		memset(&vertex, 0, sizeof(vertex));
-		memcpy(vertex.position, mvVertexArray[1].data() + i * 4, 4 * sizeof(float));
-		vertex.normal[2] = 1;
-		for (uint unit = 0; unit < 8; ++unit) vertex.texcoord[unit][3] = 1;
-		for (float &channel : vertex.color) channel = 1;
-		for (uint attribute = 0; attribute < klNumOfVertexFlags; ++attribute) {
-			if (!(mVertexFlags & kvVertexFlags[attribute]) || attribute == 1 || attribute == 3) continue;
-			uint components = mbTangents && attribute == 5 ? 4 : kvVertexElements[attribute];
-			if ((i + 1) * components > mvVertexArray[attribute].size()) continue;
-			float *destination = attribute == 0 ? vertex.normal : attribute == 2 ? vertex.color : vertex.texcoord[attribute - 4];
-			memcpy(destination, mvVertexArray[attribute].data() + i * components, components * sizeof(float));
+	if (_verticesDirty || !_vertices) {
+		vertices.resize(count);
+		for (uint i = 0; i < count; ++i) {
+			MetalShaderVertex &vertex = vertices[i];
+			memset(&vertex, 0, sizeof(vertex));
+			memcpy(vertex.position, mvVertexArray[1].data() + i * 4, 4 * sizeof(float));
+			vertex.normal[2] = 1;
+			for (uint unit = 0; unit < 8; ++unit) vertex.texcoord[unit][3] = 1;
+			for (float &channel : vertex.color) channel = 1;
+			for (uint attribute = 0; attribute < klNumOfVertexFlags; ++attribute) {
+				if (!(mVertexFlags & kvVertexFlags[attribute]) || attribute == 1 || attribute == 3) continue;
+				uint components = mbTangents && attribute == 5 ? 4 : kvVertexElements[attribute];
+				if ((i + 1) * components > mvVertexArray[attribute].size()) continue;
+				float *destination = attribute == 0 ? vertex.normal : attribute == 2 ? vertex.color : vertex.texcoord[attribute - 4];
+				memcpy(destination, mvVertexArray[attribute].data() + i * components, components * sizeof(float));
+			}
 		}
+		Graphics::Metal::Renderer &renderer = static_cast<LowLevelGraphicsMetal *>(mpLowLevelGraphics)->metal();
+		if (!count) return;
+		if (_vertices) renderer.updateBuffer(*_vertices, vertices.data(), vertices.size() * sizeof(MetalShaderVertex));
+		else _vertices = renderer.createBuffer(vertices.data(), vertices.size() * sizeof(MetalShaderVertex));
+		if (!_vertices) error("HPL1: could not allocate persistent vertices");
+		_verticesDirty = false;
 	}
 	eVertexBufferDrawType type = aDrawType == eVertexBufferDrawType_LastEnum ? mDrawType : aDrawType;
-	static_cast<LowLevelGraphicsMetal *>(mpLowLevelGraphics)->drawVertices(vertices.data(), vertices.size(), apIndices, alCount, type);
+	Graphics::Metal::GeometryBinding geometry; geometry.vertices = _vertices;
+	if (apIndices == mvIndexArray.data() && type != eVertexBufferDrawType_Quad) {
+		Graphics::Metal::Renderer &renderer = static_cast<LowLevelGraphicsMetal *>(mpLowLevelGraphics)->metal();
+		if (_indicesDirty || !_indices) {
+			for (uint index : mvIndexArray) if (index >= count) error("HPL1: persistent vertex index out of range");
+			if (_indices) renderer.updateBuffer(*_indices, mvIndexArray.data(), mvIndexArray.size() * sizeof(uint32));
+			else _indices = renderer.createBuffer(mvIndexArray.data(), mvIndexArray.size() * sizeof(uint32));
+			if (!_indices) error("HPL1: could not allocate persistent indices");
+			_indicesDirty = false;
+		}
+		geometry.indices = _indices;
+	}
+	static_cast<LowLevelGraphicsMetal *>(mpLowLevelGraphics)->drawVertices(nullptr, count, apIndices, alCount, type, &geometry);
 }
 
 //-----------------------------------------------------------------------
@@ -319,6 +348,7 @@ cBoundingVolume MetalVertexBuffer::CreateBoundingVolume() {
 }
 
 float *MetalVertexBuffer::GetArray(tVertexFlag aType) {
+	_verticesDirty = true;
 	int idx = cMath::Log2ToInt((int)aType);
 
 	return mvVertexArray[idx].empty() ? nullptr : mvVertexArray[idx].data();
@@ -327,12 +357,14 @@ float *MetalVertexBuffer::GetArray(tVertexFlag aType) {
 //-----------------------------------------------------------------------
 
 unsigned int *MetalVertexBuffer::GetIndices() {
+	_indicesDirty = true;
 	return mvIndexArray.empty() ? nullptr : mvIndexArray.data();
 }
 
 //-----------------------------------------------------------------------
 
 void MetalVertexBuffer::ResizeArray(tVertexFlag aType, int alSize) {
+	_verticesDirty = true;
 	int idx = cMath::Log2ToInt((int)aType);
 
 	mvVertexArray[idx].resize(alSize);
@@ -341,6 +373,7 @@ void MetalVertexBuffer::ResizeArray(tVertexFlag aType, int alSize) {
 //-----------------------------------------------------------------------
 
 void MetalVertexBuffer::ResizeIndices(int alSize) {
+	_indicesDirty = true;
 	mvIndexArray.resize(alSize);
 }
 

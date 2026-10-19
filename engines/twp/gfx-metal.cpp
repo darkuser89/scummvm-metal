@@ -7,6 +7,7 @@
 #include "twp/metal-shaders.h"
 #include "common/system.h"
 #include "common/textconsole.h"
+#include "graphics/metal/shader-source.h"
 
 namespace Twp {
 
@@ -20,21 +21,28 @@ struct MetalLight {
 	float position[4], color[4], cone[4], falloff[4];
 };
 
-struct MetalUniforms {
+struct MetalDrawUniforms {
 	float transform[16];
 	int32 settings[4];
 	float effects[4], ghost[4], randomValue[8];
 	float shadows[4], midtones[4], highlights[4], ambient[4], sprite[4], sheet[4];
 	float hudShadow[4], hudNormal[4], hudHighlight[4], hudRanges[4];
+};
+
+struct MetalUniforms {
+	MetalDrawUniforms draw;
 	MetalLight lights[50];
 };
 
 struct MetalShaderState {
 	Metal::Program *program = nullptr;
 	MetalUniforms uniforms = {};
-	~MetalShaderState() { delete program; }
+	Metal::Buffer *lights = nullptr;
+	bool lightsDirty = true;
+	~MetalShaderState() { delete program; delete lights; }
 };
 
+static_assert(sizeof(MetalDrawUniforms) == 304, "TWP draw uniform layout");
 static_assert(sizeof(MetalUniforms) == 3504, "TWP Metal uniform layout");
 
 void Shader::initMetal(const char *name, const char *fragment) {
@@ -47,17 +55,18 @@ void Shader::initMetal(const char *name, const char *fragment) {
 	else if (!strcmp(name, "lighting")) type = strstr(fragment, "finalCol.rgb + diffuse") ? 6 : 5;
 	else if (!strcmp(name, "hud")) type = 7;
 	else if (strcmp(name, "default")) error("TWP: no native Metal shader for %s", name);
-	shader->uniforms.settings[0] = type;
-	shader->uniforms.effects[3] = 1;
-	shader->uniforms.ghost[1] = shader->uniforms.ghost[2] = 1;
-	shader->program = g_system->getMetalRenderer()->createProgram(kTwpMetalShaderSource, "twpVertex", "twpFragment");
+	shader->uniforms.draw.settings[0] = type;
+	shader->uniforms.draw.effects[3] = 1;
+	shader->uniforms.draw.ghost[1] = shader->uniforms.draw.ghost[2] = 1;
+	Common::String replacement = Metal::shaderOverride("twp", name);
+	shader->program = g_system->getMetalRenderer()->createProgram(replacement.empty() ? kTwpMetalShaderSource : replacement.c_str(), "twpVertex", "twpFragment");
 	if (!shader->program) error("TWP: could not create Metal shader %s", name);
 	_metalShader = shader;
 }
 
 void Shader::setMetalUniform(const char *name, const float *values, size_t count, uint components) {
 	if (!_metalShader || !count || !values) return;
-	MetalUniforms &u = _metalShader->uniforms;
+	MetalDrawUniforms &u = _metalShader->uniforms.draw;
 	float *destination = nullptr;
 	uint capacity = 1;
 	if (!strcmp(name, "u_numberLights")) { u.settings[1] = (int32)values[0]; return; }
@@ -91,7 +100,7 @@ void Shader::setMetalUniform(const char *name, const float *values, size_t count
 	}
 	if (count > 50) error("TWP: Metal light array exceeds 50 lights");
 	for (uint i = 0; i < count; ++i) {
-		MetalLight &light = u.lights[i];
+		MetalLight &light = _metalShader->uniforms.lights[i];
 		float *member = nullptr;
 		if (!strcmp(name, "u_lightPos") && components == 3) member = light.position;
 		else if (!strcmp(name, "u_lightColor") && components == 3) member = light.color;
@@ -102,6 +111,7 @@ void Shader::setMetalUniform(const char *name, const float *values, size_t count
 		else if (!strcmp(name, "u_cutoffRadius") && components == 1) member = &light.falloff[1];
 		else if (!strcmp(name, "u_halfRadius") && components == 1) member = &light.falloff[2];
 		if (!member) error("TWP: unknown native Metal uniform %s", name);
+		_metalShader->lightsDirty |= memcmp(member, values + i * components, components * sizeof(float)) != 0;
 		memcpy(member, values + i * components, components * sizeof(float));
 	}
 }
@@ -112,7 +122,15 @@ void Gfx::drawMetal(uint32 primitive, Vertex *vertices, int count, uint32 *indic
 	if (!_shader || !_shader->_metalShader) error("TWP: native shader was not initialized");
 	_shader->applyUniforms();
 	MetalShaderState &shader = *_shader->_metalShader;
-	MetalUniforms uniforms = shader.uniforms;
+	MetalDrawUniforms uniforms = shader.uniforms.draw;
+	Metal::Renderer &renderer = *g_system->getMetalRenderer();
+	if (shader.lightsDirty || !shader.lights) {
+		if (shader.lights) renderer.updateBuffer(*shader.lights, shader.uniforms.lights, sizeof(shader.uniforms.lights));
+		else shader.lights = renderer.createBuffer(shader.uniforms.lights, sizeof(shader.uniforms.lights));
+		if (!shader.lights) error("TWP: could not allocate persistent lights");
+		shader.lightsDirty = false;
+	}
+	Metal::UniformBindings constants; constants.extraFragment = shader.lights;
 	Math::Matrix4 matrix = getFinalTransform(transform);
 	memcpy(uniforms.transform, matrix.getData(), sizeof(uniforms.transform));
 	struct PackedVertex { float position[2], color[4], uv[2]; };
@@ -124,12 +142,8 @@ void Gfx::drawMetal(uint32 primitive, Vertex *vertices, int count, uint32 *indic
 		memcpy(packed[i].color, vertices[i].color.v, sizeof(packed[i].color));
 		packed[i].uv[0] = vertices[i].texCoords.getX(); packed[i].uv[1] = vertices[i].texCoords.getY();
 	}
-	Common::Array<uint32> generated;
-	if (!indices) {
-		generated.resize(count);
-		for (int i = 0; i < count; ++i) generated[i] = i;
-		indices = generated.data(); indexCount = count;
-	}
+	int elements = indices ? indexCount : count;
+	if (!indices) indexCount = 0;
 	Common::Array<uint32> converted;
 	Metal::DrawState state;
 	state.blend = true; state.linear = false;
@@ -137,13 +151,13 @@ void Gfx::drawMetal(uint32 primitive, Vertex *vertices, int count, uint32 *indic
 	case kPrimitiveLines: state.primitive = Metal::kLines; break;
 	case kPrimitiveLineStrip: state.primitive = Metal::kLineStrip; break;
 	case kPrimitiveLineLoop:
-		for (int i = 0; i < indexCount; ++i) converted.push_back(indices[i]);
-		converted.push_back(indices[0]); state.primitive = Metal::kLineStrip; break;
+		for (int i = 0; i < elements; ++i) converted.push_back(indices ? indices[i] : i);
+		converted.push_back(indices ? indices[0] : 0); state.primitive = Metal::kLineStrip; break;
 	case kPrimitiveTriangleStrip: state.primitive = Metal::kTriangleStrip; break;
 	case kPrimitiveTriangleFan:
-		if (indexCount < 3) return;
-		for (int i = 1; i + 1 < indexCount; ++i) {
-			converted.push_back(indices[0]); converted.push_back(indices[i]); converted.push_back(indices[i + 1]);
+		if (elements < 3) return;
+		for (int i = 1; i + 1 < elements; ++i) {
+			converted.push_back(indices ? indices[0] : 0); converted.push_back(indices ? indices[i] : i); converted.push_back(indices ? indices[i + 1] : i + 1);
 		}
 		break;
 	case kPrimitiveTriangles: break;
@@ -162,7 +176,8 @@ void Gfx::drawMetal(uint32 primitive, Vertex *vertices, int count, uint32 *indic
 		if (source->metalTarget()) uniforms.settings[3] |= 1 << i;
 	}
 	g_system->getMetalRenderer()->drawProgram(*shader.program, packed.data(), count, sizeof(PackedVertex),
-		indices, indexCount, &uniforms, sizeof(uniforms), bindings, 2, state);
+		indices, indexCount, uniforms.transform, sizeof(uniforms.transform), bindings, 2, state,
+		uniforms.settings, sizeof(uniforms) - sizeof(uniforms.transform), nullptr, &constants);
 }
 
 } // End of namespace Twp

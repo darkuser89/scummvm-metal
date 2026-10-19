@@ -9,6 +9,7 @@
 
 #include "engines/myst3/gfx.h"
 #include "graphics/metal/renderer.h"
+#include "graphics/metal/geometry.h"
 #include "common/textconsole.h"
 
 namespace Myst3 {
@@ -23,7 +24,11 @@ public:
 		if (!texture)
 			error("Myst3: could not create Metal texture");
 	}
-	~MetalTexture() override { delete texture; }
+	MetalTexture(Graphics::Metal::Renderer *renderer, Graphics::Metal::RenderTarget *target) : _renderer(renderer), _target(target) {
+		texture = &target->texture(); width = texture->width(); height = texture->height();
+		format = Graphics::PixelFormat::createFormatRGBA32();
+	}
+	~MetalTexture() override { if (_target) delete _target; else delete texture; }
 	void update(const Graphics::Surface *surface) override {
 		updatePartial(surface, Common::Rect(surface->w, surface->h));
 	}
@@ -35,12 +40,13 @@ public:
 
 private:
 	Graphics::Metal::Renderer *_renderer;
+	Graphics::Metal::RenderTarget *_target = nullptr;
 };
 
 class MetalRenderer : public Renderer {
 public:
 	explicit MetalRenderer(OSystem *system) : Renderer(system), _metal(system->getMetalRenderer()),
-		_logicalWidth(kOriginalWidth), _logicalHeight(kOriginalHeight) {
+		_logicalWidth(kOriginalWidth), _logicalHeight(kOriginalHeight), _geometry(_metal) {
 		if (!_metal)
 			error("Myst3: Metal backend is unavailable");
 	}
@@ -105,7 +111,7 @@ public:
 		state.primitive = Graphics::Metal::kTriangleStrip;
 		state.depthTest = true;
 		state.blend = true;
-		_metal->draw(vertices, 4, static_cast<MetalTexture *>(texture)->texture, state, uniforms3D());
+		_geometry.draw(vertices, 4, static_cast<MetalTexture *>(texture)->texture, state, uniforms3D());
 	}
 
 	void drawCube(Texture **textures) override {
@@ -122,7 +128,7 @@ public:
 				for (uint c = 0; c < 4; ++c)
 					vertices[i].color[c] = 1;
 			}
-			_metal->draw(vertices, 4, static_cast<MetalTexture *>(textures[face])->texture, state, uniforms);
+			_geometry.draw(vertices, 4, static_cast<MetalTexture *>(textures[face])->texture, state, uniforms);
 		}
 	}
 
@@ -134,15 +140,32 @@ public:
 		Graphics::Metal::DrawState state;
 		state.primitive = Graphics::Metal::kTriangleStrip;
 		state.blend = true;
-		int x = position.x;
-		for (uint i = 0; i < uppercase.size(); ++i) {
-			Common::Rect atlas = getFontCharacterRect(uppercase[i]);
-			Common::Rect destination(x, position.y, x + atlas.width(), position.y + atlas.height());
-			drawQuad(destination, atlas.left / (float)_font->width, atlas.bottom / (float)_font->height,
-				atlas.right / (float)_font->width, atlas.top / (float)_font->height,
-				static_cast<MetalTexture *>(_font)->texture, state, uniforms2D());
-			x += atlas.width() - 3;
+		if (uppercase != _text || position != _textPosition || _textFontWidth != _font->width || _textFontHeight != _font->height) {
+			_text = uppercase; _textPosition = position; _textFontWidth = _font->width; _textFontHeight = _font->height;
+			_textVertices.clear();
+			int x = position.x;
+			for (uint i = 0; i < uppercase.size(); ++i) {
+				Common::Rect atlas = getFontCharacterRect(uppercase[i]);
+				float left = x, top = position.y, right = x + atlas.width(), bottom = position.y + atlas.height();
+				float u0 = atlas.left / float(_font->width), u1 = atlas.right / float(_font->width);
+				float v0 = atlas.bottom / float(_font->height), v1 = atlas.top / float(_font->height);
+				Graphics::Metal::Vertex quad[] = {{{left,top,0},{u0,v0},{1,1,1,1}},{{left,bottom,0},{u0,v1},{1,1,1,1}},
+					{{right,top,0},{u1,v0},{1,1,1,1}},{{right,bottom,0},{u1,v1},{1,1,1,1}}};
+				static const uint order[] = {0,1,2,2,1,3};
+				for (uint vertex : order) _textVertices.push_back(quad[vertex]);
+				x += atlas.width() - 3;
+			}
 		}
+		state.primitive = Graphics::Metal::kTriangles;
+		_geometry.draw(_textVertices.data(), _textVertices.size(), static_cast<MetalTexture *>(_font)->texture, state, uniforms2D());
+	}
+
+	Texture *copyScreenshotToTexture() override {
+		Common::Rect screen = viewport();
+		Graphics::Metal::RenderTarget *target = _metal->createRenderTarget(screen.width(), screen.height(), 1, Graphics::Metal::kTargetBGRA8, false, false);
+		if (!target) error("Myst3: could not allocate GPU transition image");
+		_metal->copyTexture(target->texture(), Common::Rect(screen.width(), screen.height()), *_metal->screenTexture(), screen);
+		return new MetalTexture(_metal, target);
 	}
 
 	Graphics::Surface *getScreenshot() override {
@@ -157,6 +180,11 @@ public:
 private:
 	Graphics::Metal::Renderer *_metal;
 	uint _logicalWidth, _logicalHeight;
+	Graphics::Metal::GeometryCache _geometry;
+	Common::String _text;
+	Common::Point _textPosition;
+	uint _textFontWidth = 0, _textFontHeight = 0;
+	Common::Array<Graphics::Metal::Vertex> _textVertices;
 
 	Graphics::Metal::Uniforms uniforms2D() const {
 		Graphics::Metal::Uniforms uniforms;
@@ -180,7 +208,7 @@ private:
 			{{(float)rect.right, (float)rect.top, 0}, {u1, v0}, {1, 1, 1, 1}},
 			{{(float)rect.right, (float)rect.bottom, 0}, {u1, v1}, {1, 1, 1, 1}}
 		};
-		_metal->draw(vertices, 4, texture, state, uniforms);
+		_geometry.draw(vertices, 4, texture, state, uniforms);
 	}
 };
 

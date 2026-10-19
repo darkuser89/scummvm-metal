@@ -21,16 +21,19 @@ public:
 	explicit ImGuiRenderer(Renderer &renderer);
 	~ImGuiRenderer();
 	void render(ImDrawData *data);
+	void finishPlatformWindows();
 
 private:
 	void updateTexture(ImTextureData &texture);
-	void renderDrawData(Renderer &renderer, ImDrawData *data);
+	void renderDrawData(Renderer &renderer, ImDrawData *data, Program &program);
+	static Program *createProgram(Renderer &renderer);
 	static void createWindow(ImGuiViewport *viewport);
 	static void destroyWindow(ImGuiViewport *viewport);
 	static void resizeWindow(ImGuiViewport *viewport, ImVec2 size);
 	static void renderWindow(ImGuiViewport *viewport, void *argument);
 	static void presentWindow(ImGuiViewport *viewport, void *argument);
 	Renderer &_renderer;
+	Program *_program = nullptr;
 };
 
 } // End of namespace Metal

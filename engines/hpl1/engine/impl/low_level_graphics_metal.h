@@ -196,7 +196,7 @@ public:
 	void SetupGL();
 
     void drawVertices(const MetalShaderVertex *vertices, uint count, const uint32 *indices,
-                      uint indexCount, eVertexBufferDrawType type);
+                      uint indexCount, eVertexBufferDrawType type, const Graphics::Metal::GeometryBinding *geometry = nullptr);
     void bindProgram(MetalGpuProgram *program) { _program = program; }
     void releaseProgram(MetalGpuProgram *program) { if (_program == program) _program = nullptr; }
     void releaseTexture(iTexture *texture);

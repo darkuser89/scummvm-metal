@@ -49,9 +49,10 @@ public:
 		const Graphics::Surface *rgba = converted ? converted : surface;
 		if (level == 0) {
 			delete _texture;
-			_texture = _renderer.createTexture(*rgba, true, _levelCount);
+			_texture = _renderer.allocateTexture(rgba->w, rgba->h, true, _levelCount);
 			if (!_texture)
 				error("Stark: could not allocate Metal mipmap texture");
+			_renderer.updateTextureLevel(*_texture, 0, *rgba, Common::Rect(rgba->w, rgba->h));
 		} else {
 			assert(_texture);
 			_renderer.updateTextureLevel(*_texture, level, *rgba, Common::Rect(rgba->w, rgba->h));
@@ -146,7 +147,8 @@ private:
 			vertices[i] = {{px*2-1, 1-py*2, 0}, {(float)(i&1), (float)((i>>1)&1)},
 			               {color.r/255.0f, color.g/255.0f, color.b/255.0f, color.a/255.0f}};
 		}
-		MetalUniforms uniforms = {};
+		MetalMaterialUniforms uniforms;
+		Metal::UniformBindings constants; constants.extraData = &uniforms; constants.extraSize = sizeof(uniforms);
 		uniforms.textured = texture != nullptr;
 		uniforms.fadeLevel = _fadeLevel;
 		Metal::TextureBinding binding;
@@ -155,7 +157,7 @@ private:
 		state.primitive = Metal::kTriangleStrip; state.blend = true;
 		state.srcRGB = state.srcAlpha = Metal::kBlendOne;
 		_driver.renderer().drawProgram(*_driver.surfaceProgram(), vertices, 4, sizeof(Metal::Vertex),
-			nullptr, 0, &uniforms, sizeof(uniforms), &binding, 1, state);
+			nullptr, 0, nullptr, 0, &binding, 1, state, nullptr, 0, nullptr, &constants);
 	}
 	MetalDriver &_driver;
 };
@@ -182,8 +184,9 @@ struct MetalActorVertex {
 	float position1[3], position2[3], bone1, bone2, weight, normal[3], texcoord[2];
 };
 
+static_assert(sizeof(MetalMaterialUniforms) == 48, "Stark material layout");
 static_assert(sizeof(MetalActorVertex) == 56, "Stark Metal actor vertex layout");
-static_assert(sizeof(MetalUniforms) == 3136, "Stark Metal uniform layout");
+static_assert(sizeof(MetalUniforms) == 3088, "Stark Metal uniform layout");
 
 static Math::Vector3d shadowDirection(const LightEntryArray &lights, const Math::Vector3d &position,
 		const Math::Matrix3 &worldToModel) {
@@ -223,9 +226,32 @@ static Math::Vector3d shadowDirection(const LightEntryArray &lights, const Math:
 	return worldToModel * sum;
 }
 
+struct MetalMeshBuffers {
+	Metal::Buffer *vertices = nullptr, *indices = nullptr;
+	Common::Array<uint32> offsets;
+	~MetalMeshBuffers() { delete vertices; delete indices; }
+	void appendFace(Common::Array<uint32> &all, const Common::Array<uint32> &face, uint vertexCount) {
+		offsets.push_back(all.size() * sizeof(uint32));
+		for (uint32 index : face) {
+			if (index >= vertexCount) error("Stark: persistent mesh index out of range");
+			all.push_back(index);
+		}
+	}
+	void upload(Metal::Renderer &renderer, const void *data, uint bytes, const Common::Array<uint32> &all) {
+		delete vertices; delete indices;
+		vertices = bytes ? renderer.createBuffer(data, bytes) : nullptr;
+		indices = all.empty() ? nullptr : renderer.createBuffer(all.data(), all.size() * sizeof(uint32));
+		if ((bytes && !vertices) || (!all.empty() && !indices)) error("Stark: could not allocate persistent mesh");
+	}
+	Metal::GeometryBinding binding(uint face) const {
+		Metal::GeometryBinding result; result.vertices = vertices; result.indices = indices; result.indexOffset = offsets[face]; return result;
+	}
+};
+
 class MetalActorRenderer : public VisualActor {
 public:
 	explicit MetalActorRenderer(MetalDriver &driver) : _driver(driver) {}
+	~MetalActorRenderer() override { delete _frameUniforms; }
 	void render(const Math::Vector3d &position, float direction, const LightEntryArray &lights) override {
 		if (_modelIsDirty) {
 			const Common::Array<VertNode *> &source = _model->getVertices();
@@ -238,6 +264,10 @@ public:
 				out.bone1 = v._bone1; out.bone2 = v._bone2; out.weight = v._boneWeight;
 				out.texcoord[0] = -v._texS; out.texcoord[1] = v._texT;
 			}
+			_mesh.offsets.clear();
+			Common::Array<uint32> indices;
+			for (const Face *face : _model->getFaces()) _mesh.appendFace(indices, face->vertexIndices, _vertices.size());
+			_mesh.upload(_driver.renderer(), _vertices.data(), _vertices.size() * sizeof(MetalActorVertex), indices);
 			_modelIsDirty = false;
 		}
 		_animHandler->animate(_time);
@@ -256,73 +286,108 @@ public:
 		for (uint i = 0; i < _vertices.size(); ++i)
 			if (_vertices[i].bone1 >= bones.size() || _vertices[i].bone2 >= bones.size())
 				error("Stark: invalid Metal actor bone index");
+		if (_frameUniforms) _driver.renderer().updateBuffer(*_frameUniforms, &uniforms, sizeof(uniforms));
+		else _frameUniforms = _driver.renderer().createBuffer(&uniforms, sizeof(uniforms));
+		if (!_frameUniforms) error("Stark: could not allocate frame uniforms");
+		MetalMaterialUniforms drawUniforms;
+		Metal::UniformBindings constants; constants.vertex = _frameUniforms;
+		constants.extraData = &drawUniforms; constants.extraSize = sizeof(drawUniforms);
 		Metal::DrawState state;
 		state.depthTest = state.depthWrite = true; state.depthCompare = Metal::kLess;
 		const Common::Array<Material *> &materials = _model->getMaterials();
+		uint faceIndex = 0;
 		for (const Face *face : _model->getFaces()) {
+			Metal::GeometryBinding geometry = _mesh.binding(faceIndex++);
+			if (face->vertexIndices.empty()) continue;
 			const Material *material = materials[face->materialId];
 			const MetalTexture *texture = dynamic_cast<const MetalTexture *>(resolveTexture(material));
-			uniforms.textured = texture != nullptr;
-			uniforms.color[0] = material->r; uniforms.color[1] = material->g; uniforms.color[2] = material->b;
+			drawUniforms.textured = texture != nullptr;
+			drawUniforms.color[0] = material->r; drawUniforms.color[1] = material->g; drawUniforms.color[2] = material->b;
 			Metal::TextureBinding binding;
 			binding.texture = texture ? texture->texture() : nullptr;
 			binding.wrapS = binding.wrapT = Metal::kMirror; binding.mipLinear = false;
-			_driver.renderer().drawProgram(*_driver.actorProgram(), _vertices.data(), _vertices.size(), sizeof(MetalActorVertex),
-				face->vertexIndices.data(), face->vertexIndices.size(), &uniforms, sizeof(uniforms), &binding, 1, state);
+			_driver.renderer().drawProgram(*_driver.actorProgram(), nullptr, _vertices.size(), sizeof(MetalActorVertex),
+				nullptr, face->vertexIndices.size(), nullptr, 0, &binding, 1, state, nullptr, 0, &geometry, &constants);
 		}
 		if (_castsShadow && StarkScene->shouldRenderShadows() && StarkSettings->getBoolSetting(Settings::kShadow)) {
 			Math::Matrix4 inverse = model; inverse.inverse();
 			Math::Vector3d shadowVector = shadowDirection(lights, position, inverse.getRotation());
 			// Models whose ground-plane direction is parallel have no finite projection.
 			if (fabsf(shadowVector.y()) < 0.00001f) return;
-			copyVector(uniforms.shadowDirection, shadowVector);
-			uniforms.textured = 0;
+			copyVector(drawUniforms.shadowDirection, shadowVector);
+			drawUniforms.textured = 0;
 			state.blend = true; state.srcAlpha = Metal::kSrcAlpha;
 			state.stencil = true;
 			state.frontStencil.compare = state.backStencil.compare = Metal::kEqual;
 			state.frontStencil.pass = state.backStencil.pass = Metal::kIncrementClamp;
-			for (const Face *face : _model->getFaces())
-				_driver.renderer().drawProgram(*_driver.shadowProgram(), _vertices.data(), _vertices.size(), sizeof(MetalActorVertex),
-					face->vertexIndices.data(), face->vertexIndices.size(), &uniforms, sizeof(uniforms), nullptr, 0, state);
+			faceIndex = 0;
+			for (const Face *face : _model->getFaces()) {
+				Metal::GeometryBinding geometry = _mesh.binding(faceIndex++);
+				if (face->vertexIndices.empty()) continue;
+				_driver.renderer().drawProgram(*_driver.shadowProgram(), nullptr, _vertices.size(), sizeof(MetalActorVertex),
+					nullptr, face->vertexIndices.size(), nullptr, 0, nullptr, 0, state, nullptr, 0, &geometry, &constants);
+			}
 		}
 	}
 
 private:
 	MetalDriver &_driver;
 	Common::Array<MetalActorVertex> _vertices;
+	MetalMeshBuffers _mesh;
+	Metal::Buffer *_frameUniforms = nullptr;
 };
 
 class MetalPropRenderer : public VisualProp {
 public:
 	explicit MetalPropRenderer(MetalDriver &driver) : _driver(driver) {}
+	~MetalPropRenderer() override { delete _frameUniforms; }
 	void render(const Math::Vector3d &position, float direction, const LightEntryArray &lights) override {
 		MetalUniforms uniforms;
 		_driver.setupUniforms(uniforms, getModelMatrix(position, direction), lights);
 		const Common::Array<Formats::BiffMesh::Vertex> &source = _model->getVertices();
-		Common::Array<float> vertices;
-		vertices.resize(source.size() * 9);
-		for (uint i = 0; i < source.size(); ++i) {
-			copyVector(vertices.data() + i*9, source[i].position);
-			copyVector(vertices.data() + i*9+3, source[i].normal);
-			copyVector(vertices.data() + i*9+6, source[i].texturePosition);
+		if (_uploadedRevision != _modelRevision || !_mesh.vertices) {
+			Common::Array<float> vertices;
+			vertices.resize(source.size() * 9);
+			for (uint i = 0; i < source.size(); ++i) {
+				copyVector(vertices.data() + i*9, source[i].position);
+				copyVector(vertices.data() + i*9+3, source[i].normal);
+				copyVector(vertices.data() + i*9+6, source[i].texturePosition);
+			}
+			_mesh.offsets.clear();
+			Common::Array<uint32> indices;
+			for (const Face &face : _model->getFaces()) _mesh.appendFace(indices, face.vertexIndices, source.size());
+			_mesh.upload(_driver.renderer(), vertices.data(), vertices.size() * sizeof(float), indices);
+			_uploadedRevision = _modelRevision;
 		}
+		if (_frameUniforms) _driver.renderer().updateBuffer(*_frameUniforms, &uniforms, sizeof(uniforms));
+		else _frameUniforms = _driver.renderer().createBuffer(&uniforms, sizeof(uniforms));
+		if (!_frameUniforms) error("Stark: could not allocate frame uniforms");
+		MetalMaterialUniforms drawUniforms;
+		Metal::UniformBindings constants; constants.vertex = _frameUniforms;
+		constants.extraData = &drawUniforms; constants.extraSize = sizeof(drawUniforms);
 		Metal::DrawState state;
 		state.depthTest = state.depthWrite = true; state.depthCompare = Metal::kLess;
+		uint faceIndex = 0;
 		for (const Face &face : _model->getFaces()) {
+			Metal::GeometryBinding geometry = _mesh.binding(faceIndex++);
+			if (face.vertexIndices.empty()) continue;
 			const Material &material = _model->getMaterials()[face.materialId];
 			const MetalTexture *texture = dynamic_cast<const MetalTexture *>(_texture->getTexture(material.texture));
-			uniforms.textured = texture != nullptr; uniforms.doubleSided = material.doubleSided;
-			uniforms.color[0] = material.r; uniforms.color[1] = material.g; uniforms.color[2] = material.b;
+			drawUniforms.textured = texture != nullptr; drawUniforms.doubleSided = material.doubleSided;
+			drawUniforms.color[0] = material.r; drawUniforms.color[1] = material.g; drawUniforms.color[2] = material.b;
 			Metal::TextureBinding binding;
 			binding.texture = texture ? texture->texture() : nullptr;
 			binding.wrapS = binding.wrapT = Metal::kMirror; binding.mipLinear = false;
-			_driver.renderer().drawProgram(*_driver.propProgram(), vertices.data(), source.size(), 9*sizeof(float),
-				face.vertexIndices.data(), face.vertexIndices.size(), &uniforms, sizeof(uniforms), &binding, 1, state);
+			_driver.renderer().drawProgram(*_driver.propProgram(), nullptr, source.size(), 9*sizeof(float),
+				nullptr, face.vertexIndices.size(), nullptr, 0, &binding, 1, state, nullptr, 0, &geometry, &constants);
 		}
 	}
 
 private:
 	MetalDriver &_driver;
+	MetalMeshBuffers _mesh;
+	Metal::Buffer *_frameUniforms = nullptr;
+	uint64 _uploadedRevision = 0;
 };
 
 MetalDriver::MetalDriver() : _renderer(g_system->getMetalRenderer()) {

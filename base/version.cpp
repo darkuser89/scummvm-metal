@@ -234,7 +234,7 @@ const char gScummVMFeatures[] = ""
 #endif
 
 #ifdef USE_METAL
-	"Metal3 "
+	"Metal4 "
 #endif
 
 #ifdef USE_OPENGL

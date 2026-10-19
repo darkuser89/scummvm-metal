@@ -46,7 +46,7 @@ public:
 	void enableZBuffer() override { _state.depthTest = _state.depthWrite = true; }
 	void drawLine(const TeVector3f32 &from,const TeVector3f32 &to) override;
 	void loadProjectionMatrix(const TeMatrix4x4 &matrix) override;
-	Common::String renderer() override { return "Metal 3"; }
+	Common::String renderer() override { return "Metal 4"; }
 	Common::String vendor() override { return "Apple"; }
 	void renderTransparentMeshes() override;
 	void reset() override;
@@ -73,6 +73,7 @@ protected:
 private:
 	Graphics::Metal::Renderer *_metal = nullptr;
 	Graphics::Metal::Program *_program = nullptr;
+	Graphics::Metal::Program *_pointProgram = nullptr;
 	Graphics::Metal::DrawState _state;
 	TeMetalUniforms _uniforms = {};
 	TeMatrix4x4 _loadedMatrices[3];

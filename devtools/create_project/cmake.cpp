@@ -88,7 +88,7 @@ void CMakeProvider::createWorkspace(const BuildSetup &setup) {
 	workspace << "cmake_minimum_required(VERSION 3.13)\n";
 	if (getFeatureBuildState("metal", setup.features)) {
 		workspace << "set(CMAKE_OSX_ARCHITECTURES arm64 CACHE STRING \"Metal architecture\" FORCE)\n";
-		workspace << "set(CMAKE_OSX_DEPLOYMENT_TARGET 13.0 CACHE STRING \"Metal deployment target\" FORCE)\n";
+		workspace << "set(CMAKE_OSX_DEPLOYMENT_TARGET 26.0 CACHE STRING \"Metal deployment target\" FORCE)\n";
 	}
 	workspace << "project(" << setup.projectDescription << ")\n\n";
 	if (getFeatureBuildState("metal", setup.features)) {

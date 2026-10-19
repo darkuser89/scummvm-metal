@@ -54,6 +54,7 @@ public:
 
 protected:
 	Formats::BiffMesh *_model;
+	uint64 _modelRevision = 0;
 	Gfx::TextureSet *_texture;
 	Math::AABB _boundingBox;
 

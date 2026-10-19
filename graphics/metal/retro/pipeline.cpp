@@ -66,6 +66,19 @@ static bool textureCoordinate(const Common::String &name, uint pass, const Shade
 	return false;
 }
 
+static uint previousFrames(Common::String name) {
+	uint bracket = name.findFirstOf('[');
+	if (bracket != Common::String::npos) name.erase(bracket);
+	static const char *const suffixes[] = {"TextureSize", "InputSize", "TexCoord", "Texture"};
+	for (const char *suffix : suffixes) {
+		if (!name.hasSuffix(suffix)) continue;
+		name.erase(name.size() - strlen(suffix)); break;
+	}
+	uint index = 0;
+	if (name == "Prev") return 1;
+	return numbered(name, "Prev", index) && index <= 6 ? index + 1 : 0;
+}
+
 } // anonymous namespace
 
 bool Pipeline::open(const Common::Path &path, Common::SearchSet &archives) {
@@ -99,19 +112,25 @@ bool Pipeline::open(const Common::Path &path, Common::SearchSet &archives) {
 		if (!_renderer.validateProgram(*pass.shader->program, format)) {
 			delete pass.shader; _error = "Metal rejected the preset stage interface"; close(); return false;
 		}
+		for (const Common::String &sampler : pass.shader->samplers) pass.samplers.push_back(resolveTexture(sampler, i));
 		pass.shader->setUniformInt("FrameDirection", 1);
+		for (const auto &name : pass.shader->samplers) _historyCount = MAX(_historyCount, previousFrames(name) + 1);
+		for (const auto &attribute : pass.shader->attributes) _historyCount = MAX(_historyCount, previousFrames(attribute.name) + 1);
+		for (const auto &uniform : pass.shader->uniforms) _historyCount = MAX(_historyCount, previousFrames(uniform.name) + 1);
+		_animated |= pass.shader->hasUniform("FrameCount");
 		_passes.push_back(pass);
 	}
 	for (const auto &parameter : _preset->parameters) _parameters[parameter._key] = parameter._value;
 	for (auto &pass : _passes)
 		for (const auto &parameter : _parameters) pass.shader->setUniform(parameter._key, parameter._value);
+	_animated |= _historyCount > 1;
 	return true;
 }
 
 void Pipeline::close() {
 	for (auto &pass : _passes) {
 		if (_renderer.renderTarget() == pass.target) _renderer.setRenderTarget(nullptr);
-		delete pass.shader; delete pass.target;
+		delete pass.geometry; delete pass.shader; delete pass.target;
 	}
 	_passes.clear();
 	for (auto *texture : _lookups) delete texture;
@@ -124,15 +143,19 @@ void Pipeline::close() {
 	delete _output; _output = nullptr;
 	delete _preset; _preset = nullptr;
 	_parameters.clear(); _frame = _current = 0;
+	_historyCount = 1; _animated = false;
+	_inputWidth = _inputHeight = _viewportWidth = _viewportHeight = 0;
 }
 
 bool Pipeline::ensureTargets(uint inputWidth, uint inputHeight, uint viewportWidth, uint viewportHeight) {
 	if (!_preset || !inputWidth || !inputHeight || !viewportWidth || !viewportHeight) return false;
 	bool reset = !_history[0] || _history[0]->texture().width() != inputWidth || _history[0]->texture().height() != inputHeight;
+	for (uint i = 0; i < _historyCount; ++i) reset |= !_history[i];
 	if (reset) {
-		for (auto &target : _history) {
+		for (uint i = 0; i < _historyCount; ++i) {
+			RenderTarget *&target = _history[i];
 			delete target;
-			target = _renderer.createRenderTarget(inputWidth, inputHeight, 1, kTargetBGRA8, true);
+			target = _renderer.createRenderTarget(inputWidth, inputHeight, 1, kTargetBGRA8, _preset->passes[0].mipmapInput, false);
 			if (!target) { _error = "Could not allocate preset frame history"; return false; }
 			_renderer.setRenderTarget(target); _renderer.clear(0, 0, 0, 0);
 		}
@@ -150,47 +173,53 @@ bool Pipeline::ensureTargets(uint inputWidth, uint inputHeight, uint viewportWid
 		if (!pass.target || pass.target->texture().width() != uint(width) || pass.target->texture().height() != uint(height)) {
 			delete pass.target;
 			TargetFormat format = definition.floatFBO ? kTargetRGBA16Float : definition.srgbFBO ? kTargetSRGBA8 : kTargetBGRA8;
-			pass.target = _renderer.createRenderTarget(uint(width), uint(height), 1, format, true);
+			bool mipmaps = i + 1 < _passes.size() && _preset->passes[i + 1].mipmapInput;
+			pass.target = _renderer.createRenderTarget(uint(width), uint(height), 1, format, mipmaps, false);
 			if (!pass.target) { _error = "Could not allocate preset pass target"; return false; }
 		}
 	}
 	Texture &last = _passes.back().target->texture();
 	if (!_output || _output->texture().width() != last.width() || _output->texture().height() != last.height()) {
-		delete _output; _output = _renderer.createRenderTarget(last.width(), last.height());
+		delete _output; _output = _renderer.createRenderTarget(last.width(), last.height(), 1, kTargetBGRA8, false, false);
 	}
 	if (!_output) { _error = "Could not allocate preset output texture"; return false; }
 	return true;
 }
 
-Texture *Pipeline::findTexture(const Common::String &name, uint pass, Texture &input, bool &lookup, uint &lookupIndex) {
-	lookup = false; lookupIndex = 0;
+Pipeline::TextureSource Pipeline::resolveTexture(const Common::String &name, uint pass) const {
 	Common::String identifier = name;
 	uint bracket = identifier.findFirstOf('[');
 	if (bracket != Common::String::npos) {
-		// glUniform1i binds the first array element only; untouched
-		// elements retain the sampler's default texture unit zero.
 		for (uint pos = bracket; pos < identifier.size(); ++pos)
-			if (identifier[pos] >= '1' && identifier[pos] <= '9') return &input;
+			if (identifier[pos] >= '1' && identifier[pos] <= '9') return TextureSource();
 		identifier.erase(bracket);
 	}
-	if (identifier == "Texture") return &input;
-	for (uint i = 0; i < _preset->textures.size(); ++i) {
-		if (identifier == _preset->textures[i].id) { lookup = true; lookupIndex = i; return _lookups[i]; }
-	}
+	if (identifier == "Texture") return TextureSource();
+	for (uint i = 0; i < _preset->textures.size(); ++i)
+		if (identifier == _preset->textures[i].id) return TextureSource(TextureSource::kLookup, i);
 	Common::String prefix = identifier;
 	if (prefix.hasSuffix("Texture")) prefix.erase(prefix.size() - 7);
-	if (prefix == "Orig") return &_history[_current]->texture();
+	if (prefix == "Orig") return TextureSource(TextureSource::kHistory, 0);
 	uint index = 0;
-	if (prefix == "Prev" || (numbered(prefix, "Prev", index) && index <= 6))
-		return &_history[(_current + 8 - 1 - index) % 8]->texture();
+	if (prefix == "Prev" || (numbered(prefix, "Prev", index) && index <= 6)) return TextureSource(TextureSource::kHistory, index + 1);
 	if (numbered(prefix, "PassPrev", index) && index > 0 && index <= pass + 1)
-		return index == pass + 1 ? &_history[_current]->texture() : &_passes[pass - index].target->texture();
-	if (numbered(prefix, "Pass", index) && index > 0 && index <= pass)
-		return &_passes[index - 1].target->texture();
+		return index == pass + 1 ? TextureSource(TextureSource::kHistory, 0) : TextureSource(TextureSource::kPass, pass - index);
+	if (numbered(prefix, "Pass", index) && index > 0 && index <= pass) return TextureSource(TextureSource::kPass, index - 1);
 	for (uint i = 0; i < pass; ++i)
-		if (!prefix.empty() && prefix == _preset->passes[i].alias) return &_passes[i].target->texture();
-	// Unassigned samplers in the original GL program default to unit zero.
-	return &input;
+		if (!prefix.empty() && prefix == _preset->passes[i].alias) return TextureSource(TextureSource::kPass, i);
+	return TextureSource();
+}
+
+Texture *Pipeline::findTexture(const TextureSource &source, Texture &input) {
+	switch (source.kind) {
+	case TextureSource::kInput: return &input;
+	case TextureSource::kLookup: return _lookups[source.index];
+	case TextureSource::kPass: return &_passes[source.index].target->texture();
+	case TextureSource::kHistory:
+		if (source.index >= _historyCount) return nullptr;
+		return &_history[(_current + _historyCount - source.index) % _historyCount]->texture();
+	}
+	return nullptr;
 }
 
 void Pipeline::setTextureSizes(CompiledShader &shader, const Common::String &prefix, Texture &texture) {
@@ -204,6 +233,8 @@ Texture *Pipeline::render(Texture &input, uint viewportWidth, uint viewportHeigh
 	if (!ensureTargets(input.width(), input.height(), viewportWidth, viewportHeight)) {
 		_renderer.setRenderTarget(previousTarget); _renderer.setViewport(previousViewport); return nullptr;
 	}
+	const bool sizesChanged = _inputWidth != input.width() || _inputHeight != input.height() ||
+		_viewportWidth != viewportWidth || _viewportHeight != viewportHeight;
 	// Row zero represents GL's lower edge. The GL input target maps the
 	// game's top edge to that edge, so the input copy needs no reflection.
 	// SPIRV-Cross flips clip-space Y to retain this storage convention.
@@ -215,41 +246,57 @@ Texture *Pipeline::render(Texture &input, uint viewportWidth, uint viewportHeigh
 		CompiledShader &shader = *pass.shader;
 		const ShaderPass &definition = _preset->passes[i];
 		const uint width = pass.target->texture().width(), height = pass.target->texture().height();
-		float outputSize[] = {float(width), float(height)};
-		shader.setUniform("OutputSize", outputSize, 2);
-		setTextureSizes(shader, "", *source); setTextureSizes(shader, "Orig", _history[_current]->texture());
-		setTextureSizes(shader, "Prev", _history[(_current + 7) % 8]->texture());
-		for (uint age = 1; age <= 6; ++age)
-			setTextureSizes(shader, Common::String::format("Prev%u", age), _history[(_current + 7 - age) % 8]->texture());
-		for (uint prior = 0; prior < i; ++prior) {
-			Texture &texture = _passes[prior].target->texture();
-			setTextureSizes(shader, Common::String::format("Pass%u", prior + 1), texture);
-			setTextureSizes(shader, Common::String::format("PassPrev%u", i - prior), texture);
-			if (!_preset->passes[prior].alias.empty()) setTextureSizes(shader, _preset->passes[prior].alias, texture);
-		}
-		setTextureSizes(shader, Common::String::format("PassPrev%u", i + 1), _history[_current]->texture());
-		shader.setUniformInt("FrameCount", definition.frameCountMod ? _frame % definition.frameCountMod : _frame);
-		const float matrix[] = {2.f / width, 0, 0, 0, 0, 2.f / height, 0, 0, 0, 0, 0, 0, -1, -1, 0, 1};
-		shader.setUniform("MVPMatrix", matrix, 16);
-		Common::Array<byte> vertices; vertices.resize(4 * shader.vertexStride); memset(vertices.begin(), 0, vertices.size());
-		for (uint vertex = 0; vertex < 4; ++vertex) {
-			for (const auto &attribute : shader.attributes) {
-				float values[] = {0, 0, 0, 1};
-				if (!attribute.generic && attribute.name == "VertexCoord") {
-					values[0] = (vertex & 1) ? width : 0;
-					bool bottom = vertex & 2;
-					if (i + 1 == _passes.size()) bottom = !bottom;
-					values[1] = bottom ? height : 0;
-				} else if (!attribute.generic && textureCoordinate(attribute.name, i, *_preset)) {
-					values[0] = (vertex & 1) ? 1 : 0; values[1] = (vertex & 2) ? 1 : 0;
+		if (sizesChanged || !pass.geometry) {
+			float outputSize[] = {float(width), float(height)};
+			shader.setUniform("OutputSize", outputSize, 2);
+			setTextureSizes(shader, "", *source); setTextureSizes(shader, "Orig", _history[_current]->texture());
+			setTextureSizes(shader, "Prev", _history[(_current + _historyCount - 1) % _historyCount]->texture());
+			for (uint age = 1; age <= 6; ++age)
+				setTextureSizes(shader, Common::String::format("Prev%u", age), _history[(_current + _historyCount - (age + 1) % _historyCount) % _historyCount]->texture());
+			for (uint prior = 0; prior < i; ++prior) {
+				Texture &texture = _passes[prior].target->texture();
+				setTextureSizes(shader, Common::String::format("Pass%u", prior + 1), texture);
+				setTextureSizes(shader, Common::String::format("PassPrev%u", i - prior), texture);
+				if (!_preset->passes[prior].alias.empty()) setTextureSizes(shader, _preset->passes[prior].alias, texture);
+			}
+			setTextureSizes(shader, Common::String::format("PassPrev%u", i + 1), _history[_current]->texture());
+			const float matrix[] = {2.f / width, 0, 0, 0, 0, 2.f / height, 0, 0, 0, 0, 0, 0, -1, -1, 0, 1};
+			shader.setUniform("MVPMatrix", matrix, 16);
+			Common::Array<byte> &vertices = pass.vertices;
+			vertices.resize(4 * shader.vertexStride); memset(vertices.begin(), 0, vertices.size());
+			for (uint vertex = 0; vertex < 4; ++vertex) {
+				for (const auto &attribute : shader.attributes) {
+					float values[] = {0, 0, 0, 1};
+					if (!attribute.generic && attribute.name == "VertexCoord") {
+						values[0] = (vertex & 1) ? width : 0;
+						bool bottom = vertex & 2;
+						if (i + 1 == _passes.size()) bottom = !bottom;
+						values[1] = bottom ? height : 0;
+					} else if (!attribute.generic && textureCoordinate(attribute.name, i, *_preset)) {
+						values[0] = (vertex & 1) ? 1 : 0; values[1] = (vertex & 2) ? 1 : 0;
+					}
+					memcpy(vertices.begin() + vertex * shader.vertexStride + attribute.layout.offset, values, attribute.layout.components * 4);
 				}
-				memcpy(vertices.begin() + vertex * shader.vertexStride + attribute.layout.offset, values, attribute.layout.components * 4);
+			}
+			if (pass.geometry) _renderer.updateBuffer(*pass.geometry, vertices.begin(), vertices.size());
+			else pass.geometry = _renderer.createBuffer(vertices.begin(), vertices.size());
+			if (!pass.geometry) {
+				_error = "Could not allocate preset geometry";
+				_renderer.setRenderTarget(previousTarget); _renderer.setViewport(previousViewport); return nullptr;
 			}
 		}
-		Common::Array<TextureBinding> bindings; bindings.resize(shader.samplers.size());
+		shader.setUniformInt("FrameCount", definition.frameCountMod ? _frame % definition.frameCountMod : _frame);
+		Common::Array<TextureBinding> &bindings = pass.bindings;
+		if (bindings.size() != shader.samplers.size()) bindings.resize(shader.samplers.size());
+		// mipmap_input describes this pass's input, not every historical/alias
+		// sampler. Keep native mip filtering for that explicitly requested image;
+		// generating once also covers multiple names bound to the same input.
+		if (definition.mipmapInput) _renderer.generateMipmaps(*source);
 		for (uint slot = 0; slot < bindings.size(); ++slot) {
-			TextureBinding &binding = bindings[slot]; bool lookup; uint lookupIndex;
-			binding.texture = findTexture(shader.samplers[slot], i, *source, lookup, lookupIndex);
+			TextureBinding &binding = bindings[slot];
+			const TextureSource &textureSource = pass.samplers[slot];
+			bool lookup = textureSource.kind == TextureSource::kLookup; uint lookupIndex = textureSource.index;
+			binding.texture = findTexture(textureSource, *source);
 			if (!binding.texture) {
 				_error = "Preset requests an unavailable texture: " + shader.samplers[slot];
 				_renderer.setRenderTarget(previousTarget); _renderer.setViewport(previousViewport); return nullptr;
@@ -262,29 +309,29 @@ Texture *Pipeline::render(Texture &input, uint viewportWidth, uint viewportHeigh
 				// even when another pass samples them through an alias.
 				filtering = linear ? kFilteringModeLinear : kFilteringModeNearest;
 				wrap = kWrapModeEdge;
-				for (uint prior = 0; prior < i; ++prior) {
-					if (binding.texture != &_passes[prior].target->texture()) continue;
-					filtering = _preset->passes[prior + 1].filteringMode;
-					wrap = _preset->passes[prior + 1].wrapMode;
-					break;
+				if (textureSource.kind == TextureSource::kPass) {
+					filtering = _preset->passes[textureSource.index + 1].filteringMode;
+					wrap = _preset->passes[textureSource.index + 1].wrapMode;
 				}
 			}
 			binding.linear = filtering == kFilteringModeLinear || (!lookup && !i && binding.texture == source && filtering == kFilteringModeUnspecified && linear);
 			binding.wrapS = binding.wrapT = wrap;
-			binding.mipmaps = !lookup && definition.mipmapInput;
-			if (binding.mipmaps) _renderer.generateMipmaps(*binding.texture);
+			binding.mipmaps = !lookup && binding.texture == source && definition.mipmapInput;
 		}
 		_renderer.setRenderTarget(pass.target); _renderer.setViewport(Common::Rect(width, height)); _renderer.clear(0, 0, 0, 0);
 		DrawState state; state.primitive = kTriangleStrip;
-		_renderer.drawProgram(*shader.program, vertices.begin(), 4, shader.vertexStride, nullptr, 0,
+		GeometryBinding geometry; geometry.vertices = pass.geometry;
+		_renderer.drawProgram(*shader.program, nullptr, 4, shader.vertexStride, nullptr, 0,
 			shader.vertexData.empty() ? nullptr : shader.vertexData.begin(), shader.vertexData.size(),
 			bindings.empty() ? nullptr : bindings.begin(), bindings.size(), state,
-			shader.fragmentData.empty() ? nullptr : shader.fragmentData.begin(), shader.fragmentData.size());
+			shader.fragmentData.empty() ? nullptr : shader.fragmentData.begin(), shader.fragmentData.size(), &geometry);
 		source = &pass.target->texture();
 	}
 	_renderer.copyTexture(_output->texture(), Common::Rect(source->width(), source->height()),
 		*source, Common::Rect(source->width(), source->height()), true);
-	++_frame; _current = (_current + 1) % 8;
+	_inputWidth = input.width(); _inputHeight = input.height();
+	_viewportWidth = viewportWidth; _viewportHeight = viewportHeight;
+	++_frame; _current = (_current + 1) % _historyCount;
 	_renderer.setRenderTarget(previousTarget); _renderer.setViewport(previousViewport);
 	return &_output->texture();
 }

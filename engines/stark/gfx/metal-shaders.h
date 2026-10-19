@@ -18,7 +18,10 @@ struct Uniforms {
     float4x4 modelView, projection, normal;
     Light lights[10];
     float4 boneRotation[70], bonePosition[70];
-    float4 ambient, color, shadowDirection;
+    float4 ambient;
+};
+struct Material {
+    float4 color, shadowDirection;
     uint textured, doubleSided;
     float fadeLevel;
     uint padding;
@@ -55,7 +58,7 @@ float3 lighting(float3 eyePosition, float3 eyeNormal, constant Uniforms &u) {
     return clamp(result, 0.0, 1.0);
 }
 
-vertex Varying starkActor(uint id [[vertex_id]], const device ActorVertex *vertices [[buffer(0)]], constant Uniforms &u [[buffer(1)]]) {
+vertex Varying starkActor(uint id [[vertex_id]], const device ActorVertex *vertices [[buffer(0)]], constant Uniforms &u [[buffer(1)]], constant Material &material [[buffer(2)]]) {
     const device ActorVertex &v = vertices[id];
     uint b1 = uint(v.bone1), b2 = uint(v.bone2);
     float3 position = mix(qrot(u.boneRotation[b2], float3(v.position2)) + u.bonePosition[b2].xyz,
@@ -66,27 +69,27 @@ vertex Varying starkActor(uint id [[vertex_id]], const device ActorVertex *verti
     Varying result;
     result.position = clipPosition(u.projection * eye);
     result.texcoord = float2(v.texcoord);
-    result.color = float4((u.textured ? float3(1) : u.color.rgb) * lighting(eye.xyz, normal, u), 1);
+    result.color = float4((material.textured ? float3(1) : material.color.rgb) * lighting(eye.xyz, normal, u), 1);
     return result;
 }
 
-vertex Varying starkProp(uint id [[vertex_id]], const device PropVertex *vertices [[buffer(0)]], constant Uniforms &u [[buffer(1)]]) {
+vertex Varying starkProp(uint id [[vertex_id]], const device PropVertex *vertices [[buffer(0)]], constant Uniforms &u [[buffer(1)]], constant Material &material [[buffer(2)]]) {
     const device PropVertex &v = vertices[id];
     float4 eye = u.modelView * float4(float3(v.position), 1);
     float3 normal = normalize((u.normal * float4(float3(v.normal), 0)).xyz);
     Varying result;
     result.position = clipPosition(u.projection * eye);
-    result.texcoord = float2(u.doubleSided ? v.texcoord.x : 1 - v.texcoord.x, 1 - v.texcoord.y);
-    result.color = float4((u.textured ? float3(1) : u.color.rgb) * lighting(eye.xyz, normal, u), 1);
+    result.texcoord = float2(material.doubleSided ? v.texcoord.x : 1 - v.texcoord.x, 1 - v.texcoord.y);
+    result.color = float4((material.textured ? float3(1) : material.color.rgb) * lighting(eye.xyz, normal, u), 1);
     return result;
 }
 
-vertex Varying starkShadow(uint id [[vertex_id]], const device ActorVertex *vertices [[buffer(0)]], constant Uniforms &u [[buffer(1)]]) {
+vertex Varying starkShadow(uint id [[vertex_id]], const device ActorVertex *vertices [[buffer(0)]], constant Uniforms &u [[buffer(1)]], constant Material &material [[buffer(2)]]) {
     const device ActorVertex &v = vertices[id];
     uint b1 = uint(v.bone1), b2 = uint(v.bone2);
     float3 position = mix(qrot(u.boneRotation[b2], float3(v.position2)) + u.bonePosition[b2].xyz,
                           qrot(u.boneRotation[b1], float3(v.position1)) + u.bonePosition[b1].xyz, v.weight);
-    position += u.shadowDirection.xyz * (-position.y / u.shadowDirection.y);
+    position += material.shadowDirection.xyz * (-position.y / material.shadowDirection.y);
     position.y = 0;
     Varying result;
     result.position = clipPosition(u.projection * u.modelView * float4(position, 1));
@@ -95,7 +98,7 @@ vertex Varying starkShadow(uint id [[vertex_id]], const device ActorVertex *vert
     return result;
 }
 
-vertex Varying starkSurface(uint id [[vertex_id]], const device SurfaceVertex *vertices [[buffer(0)]], constant Uniforms &u [[buffer(1)]]) {
+vertex Varying starkSurface(uint id [[vertex_id]], const device SurfaceVertex *vertices [[buffer(0)]]) {
     Varying result;
     result.position = float4(float3(vertices[id].position), 1);
     result.position.z = 0.5;
@@ -104,10 +107,10 @@ vertex Varying starkSurface(uint id [[vertex_id]], const device SurfaceVertex *v
     return result;
 }
 
-fragment float4 starkFragment(Varying in [[stage_in]], constant Uniforms &u [[buffer(1)]], texture2d<float> image [[texture(0)]], sampler filtering [[sampler(0)]]) {
+fragment float4 starkFragment(Varying in [[stage_in]], constant Material &material [[buffer(2)]], texture2d<float> image [[texture(0)]], sampler filtering [[sampler(0)]]) {
     float4 color = in.color;
-    if (u.textured) color *= image.sample(filtering, in.texcoord);
-    color.rgb += u.fadeLevel * color.a;
+    if (material.textured) color *= image.sample(filtering, in.texcoord);
+    color.rgb += material.fadeLevel * color.a;
     return color;
 }
 )metal";

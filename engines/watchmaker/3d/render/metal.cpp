@@ -33,6 +33,13 @@ public:
 	void assignData(const TextureData &data) override {
 		Graphics::Surface surface;
 		uint width = data.getWidth(), height = data.getHeight();
+		Metal::Texture *native = nullptr;
+		if (data._compression == DxtCompression::DXT1 || data._compression == DxtCompression::DXT3 || data._compression == DxtCompression::DXT5) {
+			Metal::CompressedFormat format = data._compression == DxtCompression::DXT1 ? Metal::kBC1 :
+				data._compression == DxtCompression::DXT3 ? Metal::kBC2 : Metal::kBC3;
+			native = g_system->getMetalRenderer()->createCompressedTexture(data.getData(), data.getDataSize(), width, height, format);
+		}
+		if (!native) {
 		if (data._compression == DxtCompression::UNCOMPRESSED) {
 			if (!width || !height || (uint64)width * height * 4 > (uint)data.getDataSize())
 				::error("Watchmaker: invalid RGBA texture");
@@ -52,9 +59,10 @@ public:
 			if (!Metal::decodeS3TC(data.getData(), data.getDataSize(), width, height, format, surface))
 				::error("Watchmaker: invalid compressed texture");
 		}
+		}
 		if (g_renderer) g_renderer->releaseMetalTexture(_texture);
 		delete _texture;
-		_texture = g_system->getMetalRenderer()->createTexture(surface);
+		_texture = native ? native : g_system->getMetalRenderer()->createTexture(surface);
 		surface.free();
 		if (!_texture) ::error("Watchmaker: could not upload Metal texture");
 	}

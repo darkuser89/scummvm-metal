@@ -1437,7 +1437,7 @@ void XcodeProvider::setupBuildConfiguration(const BuildSetup &setup) {
 		ADD_SETTING_QUOTE(scummvmOSX_Debug, "MACOSX_DEPLOYMENT_TARGET", "$(RECOMMENDED_MACOSX_DEPLOYMENT_TARGET)");
 		if (CONTAINS_DEFINE(setup.defines, "USE_METAL")) {
 			ADD_SETTING(scummvmOSX_Debug, "ARCHS", "arm64");
-			ADD_SETTING_QUOTE(scummvmOSX_Debug, "MACOSX_DEPLOYMENT_TARGET", "13.0");
+			ADD_SETTING_QUOTE(scummvmOSX_Debug, "MACOSX_DEPLOYMENT_TARGET", "26.0");
 			ADD_SETTING_QUOTE(scummvmOSX_Debug, "OTHER_LDFLAGS", "$(inherited) -lshaderc_shared -lspirv-cross-c-shared");
 		}
 		ADD_SETTING_QUOTE(scummvmOSX_Debug, "OTHER_CFLAGS", "");

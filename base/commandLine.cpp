@@ -119,8 +119,8 @@ static const char HELP_STRING1[] =
 	"  -f, --fullscreen         Force full-screen mode\n"
 	"  -F, --no-fullscreen      Force windowed mode\n"
 	"  -g, --gfx-mode=MODE      Select graphics mode\n"
-#ifdef USE_OPENGL
-	"  --shader=PATH            Name of internal shader or path to shader file (OpenGL only)\n"
+#if defined(USE_OPENGL) || defined(USE_METAL)
+	"  --shader=PATH            Name of internal shader or path to shader file\n"
 #endif
 	"  --stretch-mode=MODE      Select stretch mode (center, pixel-perfect, even-pixels,\n"
 	"                           fit, stretch, fit_force_aspect)\n"
@@ -129,9 +129,8 @@ static const char HELP_STRING1[] =
 	"  --scale-factor=FACTOR    Factor to scale the graphics by\n"
 	"  --filtering              Force filtered graphics mode\n"
 	"  --no-filtering           Force unfiltered graphics mode\n"
-#ifdef USE_OPENGL
-	"  --window-size=W,H        Set the ScummVM window size to the specified dimensions\n"
-	"                           (OpenGL only)\n"
+#if defined(USE_OPENGL) || defined(USE_METAL)
+	"  --window-size=W,H        Set the window size in logical pixels\n"
 #endif
 	"  --gui-theme=THEME        Select GUI theme\n"
 	"  --themepath=PATH         Path to where GUI themes are stored\n"
@@ -801,7 +800,7 @@ Common::String parseCommandLine(Common::StringMap &settings, int argc, const cha
 			DO_LONG_OPTION_BOOL("filtering")
 			END_OPTION
 
-#ifdef USE_OPENGL
+#if defined(USE_OPENGL) || defined(USE_METAL)
 			DO_LONG_OPTION("window-size")
 				Common::StringTokenizer tokenizer(option, ",");
 				if (tokenizer.empty())
@@ -811,7 +810,7 @@ Common::String parseCommandLine(Common::StringMap &settings, int argc, const cha
 					usage("Invalid window format specified: %s", option);
 				Common::String h = tokenizer.nextToken();
 
-				if (atoi(w.c_str()) == 0 || atoi(h.c_str()) == 0)
+				if (atoi(w.c_str()) <= 0 || atoi(h.c_str()) <= 0)
 					usage("Invalid window format specified: %s", option);
 
 				settings["last_window_width"] = w;

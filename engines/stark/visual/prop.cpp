@@ -39,6 +39,7 @@ VisualProp::~VisualProp() {
 }
 
 void VisualProp::setModel(Formats::BiffMesh *model) {
+	++_modelRevision;
 	assert(!_model);
 
 	_model = model;

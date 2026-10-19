@@ -40,19 +40,17 @@ public:
 		_size = 0;
 	}
 
-	DXBuffer(uint64 size) {
+	DXBuffer(uint64 size) : _size(0) {
 		_ptr = new uint8_t[size];
 		if (_ptr == nullptr) {
-			size = 0;
 			return;
 		}
 		_size = size;
 	}
 
-	DXBuffer(const uint8 *ptr, uint64 size) {
+	DXBuffer(const uint8 *ptr, uint64 size) : _size(0) {
 		_ptr = new uint8[size];
 		if (_ptr == nullptr) {
-			size = 0;
 			return;
 		}
 		memcpy(_ptr, ptr, size);

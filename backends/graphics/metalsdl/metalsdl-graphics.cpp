@@ -27,6 +27,7 @@ MetalSdlGraphicsManager::~MetalSdlGraphicsManager() {
 	destroyingWindow();
 	delete _shader; _shader = nullptr;
 	_gameFrame.free();
+	_cursorInvertSurface.free();
 }
 
 bool MetalSdlGraphicsManager::saveScreenshot(const Common::Path &filename) const {
@@ -50,6 +51,8 @@ bool MetalSdlGraphicsManager::saveScreenshot(const Common::Path &filename) const
 }
 
 bool MetalSdlGraphicsManager::hasFeature(OSystem::Feature feature) const {
+	if (feature == OSystem::kFeatureCursorMaskInvert || feature == OSystem::kFeatureOverlaySupportsAlpha)
+		return true;
 	if (feature == OSystem::kFeatureShaders)
 		return Graphics::Metal::Renderer::isSupported();
 	if (feature == OSystem::kFeatureMetalForGame)
@@ -59,10 +62,10 @@ bool MetalSdlGraphicsManager::hasFeature(OSystem::Feature feature) const {
 
 const OSystem::GraphicsMode *MetalSdlGraphicsManager::getSupportedGraphicsModes() const {
 	static const OSystem::GraphicsMode modes[] = {
-		{"metal", "Metal 3", GFX_SURFACESDL},
-		{"metal-fx", "Metal 3 + MetalFX (Spatial)", kMetalFXMode}, {nullptr, nullptr, 0}
+		{"metal", "Metal 4", GFX_SURFACESDL},
+		{"metal-fx", "Metal 4 + MetalFX (Spatial)", kMetalFXMode}, {nullptr, nullptr, 0}
 	};
-	static const OSystem::GraphicsMode basic[] = {{"metal", "Metal 3", GFX_SURFACESDL}, {nullptr, nullptr, 0}};
+	static const OSystem::GraphicsMode basic[] = {{"metal", "Metal 4", GFX_SURFACESDL}, {nullptr, nullptr, 0}};
 	static const bool supportsMetalFX = Graphics::Metal::Renderer::isMetalFXSupported();
 	return supportsMetalFX ? modes : basic;
 }
@@ -194,37 +197,11 @@ void MetalSdlGraphicsManager::updateScreen() {
 		notifyResize(width, height);
 	_metal.setRenderTarget(_composition);
 	if (_overlayVisible) {
-		SurfaceSdlGraphicsManager::updateScreen();
+		drawOverlay();
 	} else {
 		_metal.clear(0, 0, 0);
 		drawGameTexture(_metal.screenTexture(), _gameDrawRect);
-		if (!_shaderCursorComposed && _cursorVisible && _mouseSurface && _mouseCurState.w && _mouseCurState.h) {
-			if (_cursorTextureDirty || !_cursorTexture) {
-				delete _cursorTexture;
-				_cursorTexture = textureFromSurface(_mouseSurface);
-				_cursorTextureDirty = false;
-			}
-			Common::Point cursor = convertWindowToVirtual(_cursorX, _cursorY);
-			int x = cursor.x * _videoMode.hardwareWidth / getWidth() - _mouseCurState.rHotX;
-			int y = cursor.y * _videoMode.hardwareHeight / getHeight() - _mouseCurState.rHotY;
-			drawTexture(_cursorTexture, mapScreenRect(Common::Rect(x, y, x + _mouseCurState.rW, y + _mouseCurState.rH)), false, true);
-		}
-#ifdef USE_OSD
-		updateOSD();
-		if (_osdMessageSurface) {
-			Graphics::Metal::Texture *message = textureFromSurface(_osdMessageSurface);
-			SDL_Rect rect = getOSDMessageRect();
-			drawTexture(message, mapScreenRect(Common::Rect(rect.x, rect.y, rect.x + rect.w, rect.y + rect.h)),
-				false, true, _osdMessageAlpha / 255.f);
-			delete message;
-		}
-		if (_osdIconSurface) {
-			Graphics::Metal::Texture *icon = textureFromSurface(_osdIconSurface);
-			SDL_Rect rect = getOSDIconRect();
-			drawTexture(icon, mapScreenRect(Common::Rect(rect.x, rect.y, rect.x + rect.w, rect.y + rect.h)), false, true);
-			delete icon;
-		}
-#endif
+		drawInterface();
 #ifdef USE_IMGUI
 		renderImGui();
 #endif
@@ -240,6 +217,30 @@ void MetalSdlGraphicsManager::blitCursor() {
 	_cursorTextureDirty = true;
 }
 
+void MetalSdlGraphicsManager::setMouseCursor(const void *buf, uint w, uint h, int hotspotX, int hotspotY,
+		uint32 keycolor, const Graphics::PixelFormat *format, const byte *mask, frac_t scaleX, frac_t scaleY) {
+	_indexedCursor.clear(); _indexedCursorMask.clear();
+	if (mask && (!format || format->isCLUT8()) && w && h) {
+		_indexedCursor.resize(w * h); _indexedCursorMask.resize(w * h);
+		memcpy(_indexedCursor.data(), buf, w * h); memcpy(_indexedCursorMask.data(), mask, w * h);
+	}
+	// SurfaceSDL masks inversion pixels out of the ordinary cursor. Keep their
+	// independent mask so neither palette changes nor RGBA alpha can lose them.
+	delete _cursorInvertTexture; _cursorInvertTexture = nullptr;
+	_cursorInvertSurface.free();
+	bool inversion = false;
+	for (uint i = 0; mask && i < w * h; ++i)
+		inversion |= mask[i] == kCursorMaskInvert;
+	if (inversion) {
+		_cursorInvertSurface.create(w, h, Graphics::PixelFormat::createFormatRGBA32());
+		for (uint y = 0; y < h; ++y)
+			for (uint x = 0; x < w; ++x)
+				_cursorInvertSurface.setPixel(x, y, mask[y * w + x] == kCursorMaskInvert ? 0xffffffff : 0);
+	}
+	SurfaceSdlGraphicsManager::setMouseCursor(buf, w, h, hotspotX, hotspotY, keycolor, format, mask, scaleX, scaleY);
+	_cursorTextureDirty = true;
+}
+
 void MetalSdlGraphicsManager::internUpdateScreen() {
 	if (_render3D) {
 		SurfaceSdlGraphicsManager::internUpdateScreen();
@@ -252,17 +253,93 @@ void MetalSdlGraphicsManager::internUpdateScreen() {
 	if (width > 0 && height > 0 && (width != _windowWidth || height != _windowHeight))
 		notifyResize(width, height);
 	_metal.setRenderTarget(_composition);
-	if (!_overlayVisible && _scalerPlugin)
+	if (_overlayVisible)
+		drawOverlay();
+	else if (_scalerPlugin)
 		drawNative2D();
 	else
 		SurfaceSdlGraphicsManager::internUpdateScreen();
 	_metal.setRenderTarget(nullptr);
 }
 
-void MetalSdlGraphicsManager::drawNative2D() {
+bool MetalSdlGraphicsManager::redrawRequired() {
+#ifdef USE_OSD
+	bool forced = _forceRedraw;
+	SDL_Surface *message = _osdMessageSurface, *icon = _osdIconSurface;
+	uint8 alpha = _osdMessageAlpha;
+	updateOSD();
+	// Fixed OSD pixels do not animate during the initial hold period. Only
+	// content, fade alpha and appearance/disappearance require another frame.
+	_forceRedraw = forced || alpha != _osdMessageAlpha || message != _osdMessageSurface || icon != _osdIconSurface ||
+		(_osdMessageSurface && _messageTextureDirty) || (_osdIconSurface && _iconTextureDirty);
+#endif
+#ifdef USE_IMGUI
+	if (_imGuiCallbacks.render) return true;
+#endif
+	return (_overlayVisible && _render3D) || _forceRedraw || _cursorNeedsRedraw || _numDirtyRects ||
+		!_uploadedGameVersion || _uploadedGameVersion != _gameSourceVersion ||
+		(_screenFormat.isCLUT8() && _paletteDirtyEnd) || (_shader && _shader->isAnimated());
+}
+
+Graphics::Metal::Texture *MetalSdlGraphicsManager::prepareCpuScaledTexture(bool force) {
+	bool paletteChanged = _screenFormat.isCLUT8() && _paletteDirtyEnd;
+	if (paletteChanged) {
+		SDL_SetColors(_screen, _currentPalette, 0, 256); _paletteDirtyEnd = 0;
+	}
+	// CPU scaling consumes converted SDL pixels directly. No index upload,
+	// palette pass or unscaled RGBA upload is needed for this frame.
+	delete _gameTexture; _gameTexture = nullptr;
+	delete _paletteTexture; _paletteTexture = nullptr;
+	if (_paletteTarget) {
+		if (_metal.renderTarget() == _paletteTarget) _metal.setRenderTarget(_composition);
+		delete _paletteTarget; _paletteTarget = nullptr;
+	}
+	int factor = _videoMode.scaleFactor;
+	int width = _screen->w * factor, height = _screen->h * factor;
+	bool recreate = !_scaledGameTexture || _scaledFrame.w != width || _scaledFrame.h != height;
+	force |= recreate || paletteChanged || scalerSourceNeedsRestore();
+	if (!force && _uploadedGameVersion == _gameSourceVersion) return _scaledGameTexture;
+	if (recreate) _scaledFrame.create(width, height, Graphics::PixelFormat::createFormatRGBA32());
+	Common::Rect area;
+	if (force || !_numDirtyRects) area = Common::Rect(_screen->w, _screen->h);
+	else {
+		for (int i = 0; i < _numDirtyRects; ++i) {
+			const SDL_Rect &r = _dirtyRectList[i];
+			Common::Rect dirty(r.x, r.y, r.x + r.w, r.y + r.h);
+			if (area.isEmpty()) area = dirty; else area.extend(dirty);
+		}
+		area.left -= _maxExtraPixels; area.top -= _maxExtraPixels;
+		area.right += _maxExtraPixels; area.bottom += _maxExtraPixels;
+		area.clip(Common::Rect(_screen->w, _screen->h));
+	}
+	if (area.isEmpty()) return _scaledGameTexture;
+	restoreScalerSourceAfterOverlay();
+	SDL_Rect sourceRect = {area.left, area.top, area.width(), area.height()};
+	SDL_Rect destinationRect = {area.left + int(_maxExtraPixels), area.top + int(_maxExtraPixels), area.width(), area.height()};
+	if (SDL_BlitSurface(_screen, &sourceRect, _tmpscreen, &destinationRect) != 0)
+		error("Metal: could not convert scaler input: %s", SDL_GetError());
+	SDL_LockSurface(_tmpscreen);
+	const byte *source = (byte *)_tmpscreen->pixels + (area.top + _maxExtraPixels) * _tmpscreen->pitch +
+		(area.left + _maxExtraPixels) * _tmpscreen->format->BytesPerPixel;
+	_scaler->scale(source, _tmpscreen->pitch, (byte *)_scaledFrame.getBasePtr(area.left * factor, area.top * factor),
+		_scaledFrame.pitch, area.width(), area.height(), area.left, area.top);
+	SDL_UnlockSurface(_tmpscreen);
+	if (recreate) {
+		delete _scaledGameTexture; _scaledGameTexture = _metal.createTexture(_scaledFrame);
+	} else {
+		_metal.updateTexture(*_scaledGameTexture, _scaledFrame,
+			Common::Rect(area.left * factor, area.top * factor, area.right * factor, area.bottom * factor));
+	}
+	if (!_scaledGameTexture) error("Metal: could not allocate CPU-scaled game texture");
+	_uploadedGameVersion = _gameSourceVersion;
+	return _scaledGameTexture;
+}
+
+Graphics::Metal::Texture *MetalSdlGraphicsManager::prepareGameTexture(bool force) {
 	using namespace Graphics::Metal;
-	GUI::Debugger *debugger = g_engine ? g_engine->getDebugger() : nullptr;
-	if (debugger) debugger->onFrame();
+	force |= !_uploadedGameVersion || (_uploadedGameVersion != _gameSourceVersion &&
+		(_forceRedraw || _overlayVisible || !_numDirtyRects));
+	if (_scalerPlugin && strcmp(_scalerPlugin->getName(), "normal")) return prepareCpuScaledTexture(force);
 	Graphics::Surface pixels;
 	pixels.init(_screen->w, _screen->h, _screen->pitch, _screen->pixels, _screenFormat);
 	bool indexed = _screenFormat.isCLUT8();
@@ -272,7 +349,7 @@ void MetalSdlGraphicsManager::drawNative2D() {
 		delete _gameTexture;
 		_gameTexture = indexed ? _metal.createIndexTexture(pixels) : _metal.createTexture(pixels);
 		_gameTextureIsIndexed = indexed;
-	} else if (_forceRedraw) {
+	} else if (force) {
 		if (indexed) _metal.updateIndexTexture(*_gameTexture, pixels, Common::Rect(pixels.w, pixels.h));
 		else _metal.updateTexture(*_gameTexture, pixels, Common::Rect(pixels.w, pixels.h));
 	} else {
@@ -286,7 +363,7 @@ void MetalSdlGraphicsManager::drawNative2D() {
 	if (!_gameTexture) error("Metal: could not allocate native game texture");
 	Texture *image = _gameTexture;
 	if (indexed) {
-		bool paletteImageChanged = recreate || _forceRedraw || _numDirtyRects > 0 ||
+		bool paletteImageChanged = recreate || force || _numDirtyRects > 0 ||
 			!_paletteTexture || _paletteDirtyEnd;
 		if (!_paletteTexture || _paletteDirtyEnd) {
 			Graphics::Surface palette;
@@ -303,7 +380,7 @@ void MetalSdlGraphicsManager::drawNative2D() {
 		if (!_paletteTarget || _paletteTarget->texture().width() != (uint)pixels.w ||
 		    _paletteTarget->texture().height() != (uint)pixels.h) {
 			delete _paletteTarget;
-			_paletteTarget = _metal.createRenderTarget(pixels.w, pixels.h);
+			_paletteTarget = _metal.createRenderTarget(pixels.w, pixels.h, 1, Graphics::Metal::kTargetBGRA8, false, false);
 			paletteImageChanged = true;
 		}
 		if (!_paletteProgram) {
@@ -340,28 +417,16 @@ fragment float4 paletteFragment(Varying in [[stage_in]], texture2d<float> indice
 		}
 		image = &_paletteTarget->texture();
 	}
-	if (strcmp(_scalerPlugin->getName(), "normal")) {
-		// Match OpenGL's CPU scaler stage before its hardware shader pipeline.
-		// The cursor and OSD are composited separately, at their original stages.
-		SDL_Rect sourceRect = {0, 0, _screen->w, _screen->h};
-		SDL_Rect destinationRect = {int(_maxExtraPixels), int(_maxExtraPixels), _screen->w, _screen->h};
-		if (SDL_BlitSurface(_screen, &sourceRect, _tmpscreen, &destinationRect) != 0)
-			error("Metal: could not convert scaler input: %s", SDL_GetError());
-		restoreScalerSourceAfterOverlay();
-		const int scaledWidth = _screen->w * _videoMode.scaleFactor;
-		const int scaledHeight = _screen->h * _videoMode.scaleFactor;
-		if (_scaledFrame.w != scaledWidth || _scaledFrame.h != scaledHeight)
-			_scaledFrame.create(scaledWidth, scaledHeight, Graphics::PixelFormat::createFormatRGBA32());
-		SDL_LockSurface(_tmpscreen);
-		const byte *source = (byte *)_tmpscreen->pixels + _maxExtraPixels * (_tmpscreen->pitch + _tmpscreen->format->BytesPerPixel);
-		_scaler->scale(source, _tmpscreen->pitch, (byte *)_scaledFrame.getPixels(), _scaledFrame.pitch, _screen->w, _screen->h, 0, 0);
-		SDL_UnlockSurface(_tmpscreen);
-		if (!_scaledGameTexture || _scaledGameTexture->width() != (uint)_scaledFrame.w || _scaledGameTexture->height() != (uint)_scaledFrame.h) {
-			delete _scaledGameTexture; _scaledGameTexture = _metal.createTexture(_scaledFrame);
-		} else _metal.updateTexture(*_scaledGameTexture, _scaledFrame, Common::Rect(_scaledFrame.w, _scaledFrame.h));
-		if (!_scaledGameTexture) error("Metal: could not allocate CPU-scaled game texture");
-		image = _scaledGameTexture;
-	}
+
+	_uploadedGameVersion = _gameSourceVersion;
+	return image;
+}
+
+void MetalSdlGraphicsManager::drawNative2D() {
+	GUI::Debugger *debugger = g_engine ? g_engine->getDebugger() : nullptr;
+	if (debugger) debugger->onFrame();
+	if (!redrawRequired()) return;
+	Graphics::Metal::Texture *image = prepareGameTexture();
 	_metal.clear(0, 0, 0);
 	Common::Rect game = _gameDrawRect;
 	// Match SDL's shake offsets without changing the game's logical framebuffer.
@@ -376,10 +441,48 @@ fragment float4 paletteFragment(Varying in [[stage_in]], texture2d<float> indice
 #ifdef USE_IMGUI
 	renderImGui();
 #endif
-	presentScreen();
 	_numDirtyRects = 0;
 	_forceRedraw = false;
 	_cursorNeedsRedraw = false;
+	presentScreen();
+}
+
+void MetalSdlGraphicsManager::drawOverlay() {
+	if (!_overlayscreen || !_screen || !_composition || !redrawRequired()) return;
+	using namespace Graphics::Metal;
+	Texture *background = _metal.screenTexture();
+	if (!_render3D) {
+		bool scaled = _scalerPlugin && strcmp(_scalerPlugin->getName(), "normal");
+		background = scaled ? _scaledGameTexture : _gameTextureIsIndexed && _paletteTarget ? &_paletteTarget->texture() : _gameTexture;
+		if (!background || _uploadedGameVersion != _gameSourceVersion || (_screenFormat.isCLUT8() && _paletteDirtyEnd))
+			background = prepareGameTexture(true);
+	}
+	_metal.setRenderTarget(_composition);
+	_metal.clear(0, 0, 0);
+	bool cursorVisible = _cursorVisible; _cursorVisible = false;
+	drawGameTexture(background, _gameDrawRect);
+	_cursorVisible = cursorVisible; _shaderCursorComposed = false;
+	Graphics::Surface overlay;
+	overlay.init(_overlayscreen->w, _overlayscreen->h, _overlayscreen->pitch, _overlayscreen->pixels,
+		convertSDLPixelFormat(_overlayscreen->format));
+	if (!_overlayTexture || _overlayTexture->width() != uint(overlay.w) || _overlayTexture->height() != uint(overlay.h)) {
+		delete _overlayTexture; _overlayTexture = _metal.createTexture(overlay);
+	} else if (_forceRedraw) {
+		_metal.updateTexture(*_overlayTexture, overlay, Common::Rect(overlay.w, overlay.h));
+	} else {
+		for (int i = 0; i < _numDirtyRects; ++i) {
+			const SDL_Rect &r = _dirtyRectList[i];
+			_metal.updateTexture(*_overlayTexture, overlay, Common::Rect(r.x, r.y, r.x + r.w, r.y + r.h));
+		}
+	}
+	if (!_overlayTexture) error("Metal: could not allocate alpha overlay");
+	drawTexture(_overlayTexture, _overlayDrawRect, _videoMode.filtering, true, 1, false);
+	drawInterface();
+#ifdef USE_IMGUI
+	renderImGui();
+#endif
+	_numDirtyRects = 0; _forceRedraw = false; _cursorNeedsRedraw = false;
+	presentScreen();
 }
 
 void MetalSdlGraphicsManager::drawInterface() {
@@ -387,39 +490,64 @@ void MetalSdlGraphicsManager::drawInterface() {
 #ifdef USE_OSD
 	updateOSD();
 	if (_osdMessageSurface) {
-		Graphics::Metal::Texture *message = textureFromSurface(_osdMessageSurface);
+		if (_messageTextureDirty || !_messageTexture) {
+			_messageTexture = textureFromSurface(_osdMessageSurface, _messageTexture); _messageTextureDirty = false;
+		}
+		Graphics::Metal::Texture *message = _messageTexture;
 		SDL_Rect rect = getOSDMessageRect();
 		drawTexture(message, mapScreenRect(Common::Rect(rect.x, rect.y, rect.x + rect.w, rect.y + rect.h)),
 			false, true, _osdMessageAlpha / 255.f);
-		delete message;
 	}
 	if (_osdIconSurface) {
-		Graphics::Metal::Texture *icon = textureFromSurface(_osdIconSurface);
+		if (_iconTextureDirty || !_iconTexture) {
+			_iconTexture = textureFromSurface(_osdIconSurface, _iconTexture); _iconTextureDirty = false;
+		}
+		Graphics::Metal::Texture *icon = _iconTexture;
 		SDL_Rect rect = getOSDIconRect();
 		drawTexture(icon, mapScreenRect(Common::Rect(rect.x, rect.y, rect.x + rect.w, rect.y + rect.h)), false, true);
-		delete icon;
 	}
 #endif
 }
 
-void MetalSdlGraphicsManager::drawCursor(const Common::Rect *shaderRect) {
+void MetalSdlGraphicsManager::drawCursor(const Common::Rect *shaderRect, bool invertOnly) {
 	if (_cursorVisible && _mouseSurface && _mouseCurState.w && _mouseCurState.h) {
 		if (_cursorTextureDirty || !_cursorTexture) {
 			delete _cursorTexture;
-			_cursorTexture = textureFromSurface(_mouseSurface);
+			if (!_indexedCursor.empty()) {
+				Graphics::Surface pixels; pixels.create(_mouseCurState.w, _mouseCurState.h, Graphics::PixelFormat::createFormatRGBA32());
+				const SDL_Color *palette = _cursorPaletteDisabled ? _currentPalette : _cursorPalette;
+				for (uint i = 0; i < _indexedCursor.size(); ++i) {
+					const SDL_Color &color = palette[_indexedCursor[i]];
+					uint32 pixel = _indexedCursorMask[i] == kCursorMaskOpaque ? pixels.format.ARGBToColor(255, color.r, color.g, color.b) : 0;
+					((uint32 *)pixels.getPixels())[i] = pixel;
+				}
+				_cursorTexture = _metal.createTexture(pixels); pixels.free();
+				if (!_cursorTexture) error("Metal: could not allocate masked palette cursor");
+			} else _cursorTexture = textureFromSurface(_mouseSurface);
 			_cursorTextureDirty = false;
 		}
 		Common::Point cursor = convertWindowToVirtual(_cursorX, _cursorY);
-		int x = cursor.x * _videoMode.hardwareWidth / getWidth() - _mouseCurState.rHotX;
-		int y = cursor.y * _videoMode.hardwareHeight / getHeight() - _mouseCurState.rHotY;
+		int x = (_overlayInGUI ? cursor.x : cursor.x * _videoMode.hardwareWidth / MAX<int>(1, getWidth())) - _mouseCurState.rHotX;
+		int y = (_overlayInGUI ? cursor.y : cursor.y * _videoMode.hardwareHeight / MAX<int>(1, getHeight())) - _mouseCurState.rHotY;
 		Common::Rect rectangle(x, y, x + _mouseCurState.rW, y + _mouseCurState.rH);
 		if (shaderRect) {
 			rectangle = Common::Rect(x * shaderRect->width() / _videoMode.hardwareWidth,
 				y * shaderRect->height() / _videoMode.hardwareHeight,
 				(x + _mouseCurState.rW) * shaderRect->width() / _videoMode.hardwareWidth,
 				(y + _mouseCurState.rH) * shaderRect->height() / _videoMode.hardwareHeight);
+		} else if (_overlayInGUI) {
+			const Common::Rect &area = _overlayDrawRect;
+			rectangle = Common::Rect(area.left + x * area.width() / MAX<int>(1, getOverlayWidth()),
+				area.top + y * area.height() / MAX<int>(1, getOverlayHeight()),
+				area.left + (x + _mouseCurState.rW) * area.width() / MAX<int>(1, getOverlayWidth()),
+				area.top + (y + _mouseCurState.rH) * area.height() / MAX<int>(1, getOverlayHeight()));
 		} else rectangle = mapScreenRect(rectangle);
-		drawTexture(_cursorTexture, rectangle, false, true, 1, !shaderRect);
+		if (!invertOnly) drawTexture(_cursorTexture, rectangle, false, true, 1, !shaderRect && !_overlayInGUI);
+		if (_cursorInvertSurface.getPixels()) {
+			if (!_cursorInvertTexture) _cursorInvertTexture = _metal.createTexture(_cursorInvertSurface);
+			if (!_cursorInvertTexture) error("Metal: could not allocate cursor inversion mask");
+			drawTexture(_cursorInvertTexture, rectangle, false, true, 1, !shaderRect && !_overlayInGUI, true);
+		}
 	}
 }
 
@@ -437,7 +565,7 @@ void MetalSdlGraphicsManager::drawGameTexture(Graphics::Metal::Texture *texture,
 	if (_shader && _shader->isOpen()) {
 		if (!_shaderInput || _shaderInput->texture().width() != texture->width() || _shaderInput->texture().height() != texture->height()) {
 			delete _shaderInput;
-			_shaderInput = _metal.createRenderTarget(texture->width(), texture->height());
+			_shaderInput = _metal.createRenderTarget(texture->width(), texture->height(), 1, Graphics::Metal::kTargetBGRA8, false, false);
 		}
 		if (_shaderInput) {
 			Common::Rect inputRect(texture->width(), texture->height());
@@ -456,7 +584,7 @@ void MetalSdlGraphicsManager::drawGameTexture(Graphics::Metal::Texture *texture,
 	drawTexture(texture, rect, _videoMode.filtering, false);
 }
 
-Graphics::Metal::Texture *MetalSdlGraphicsManager::textureFromSurface(SDL_Surface *surface) {
+Graphics::Metal::Texture *MetalSdlGraphicsManager::textureFromSurface(SDL_Surface *surface, Graphics::Metal::Texture *reuse) {
 	SDL_Surface *rgba = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGBA32, 0);
 	if (!rgba)
 		error("Metal: could not convert compositing surface: %s", SDL_GetError());
@@ -472,7 +600,10 @@ Graphics::Metal::Texture *MetalSdlGraphicsManager::textureFromSurface(SDL_Surfac
 	}
 	Graphics::Surface data;
 	data.init(rgba->w, rgba->h, rgba->pitch, rgba->pixels, Graphics::PixelFormat::createFormatRGBA32());
-	Graphics::Metal::Texture *texture = _metal.createTexture(data);
+	Graphics::Metal::Texture *texture = reuse;
+	if (!texture || texture->width() != uint(data.w) || texture->height() != uint(data.h)) {
+		delete texture; texture = _metal.createTexture(data);
+	} else _metal.updateTexture(*texture, data, Common::Rect(data.w, data.h));
 	SDL_FreeSurface(rgba);
 	if (!texture)
 		error("Metal: could not allocate compositing texture");
@@ -510,8 +641,6 @@ void MetalSdlGraphicsManager::presentBuffer() {
 }
 
 void MetalSdlGraphicsManager::showOverlay(bool inGUI) {
-	if (_render3D && !_overlayVisible)
-		captureGameFrame();
 	SurfaceSdlGraphicsManager::showOverlay(inGUI);
 }
 
@@ -520,7 +649,9 @@ void MetalSdlGraphicsManager::hideOverlay() {
 }
 
 void MetalSdlGraphicsManager::clearOverlay() {
-	SurfaceSdlGraphicsManager::clearOverlay();
+	Common::StackLock lock(_graphicsMutex);
+	if (_overlayscreen) SDL_FillRect(_overlayscreen, nullptr, 0);
+	_forceRedraw = true;
 }
 
 void MetalSdlGraphicsManager::releaseRenderResources() {
@@ -534,6 +665,14 @@ void MetalSdlGraphicsManager::releaseRenderResources() {
 	_metal.setRenderTarget(nullptr);
 	delete _composition; _composition = nullptr;
 	delete _cursorTexture; _cursorTexture = nullptr;
+	delete _overlayTexture; _overlayTexture = nullptr;
+#ifdef USE_OSD
+	delete _messageTexture; _messageTexture = nullptr;
+	delete _iconTexture; _iconTexture = nullptr;
+	_messageTextureDirty = _iconTextureDirty = true;
+#endif
+	_uploadedGameVersion = 0;
+	delete _cursorInvertTexture; _cursorInvertTexture = nullptr;
 	delete _gameTexture; _gameTexture = nullptr;
 	delete _scaledGameTexture; _scaledGameTexture = nullptr;
 	_scaledFrame.free();
@@ -545,6 +684,8 @@ void MetalSdlGraphicsManager::releaseRenderResources() {
 }
 
 void MetalSdlGraphicsManager::destroyingWindow() {
+	rememberWindowSize();
+	if (_windowGeometryChanged) { ConfMan.flushToDisk(); _windowGeometryChanged = false; }
 	releaseRenderResources();
 	_metal.detachLayer();
 	if (_view)
@@ -583,8 +724,8 @@ SDL_Surface *MetalSdlGraphicsManager::SDL_SetVideoMode(int width, int height, in
 		gameRenderSize(renderWidth, renderHeight);
 		uint samples = _render3D && ConfMan.hasKey("antialiasing") ? MAX(1, ConfMan.getInt("antialiasing")) : 1;
 		if (!_metal.supportsSamples(samples)) samples = 1;
-		if (!_metal.resize(renderWidth, renderHeight, samples)) return nullptr;
-		_composition = _metal.createRenderTarget(width, height);
+		if (!_metal.resize(renderWidth, renderHeight, samples, _render3D)) return nullptr;
+		_composition = _metal.createRenderTarget(width, height, 1, Graphics::Metal::kTargetBGRA8, false, false);
 		if (!_composition) return nullptr;
 		_isDoubleBuf = _isHwPalette = false;
 		handleResize(width, height);
@@ -593,13 +734,23 @@ SDL_Surface *MetalSdlGraphicsManager::SDL_SetVideoMode(int width, int height, in
 	uint32 windowFlags = SDL_WINDOW_METAL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
 	if (_videoMode.fullscreen)
 		windowFlags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
-	if (!createOrUpdateWindow(width, height, windowFlags))
+	int requestedWidth = width, requestedHeight = height;
+	bool firstWindow = !_window->getSDLWindow();
+	if (!_videoMode.fullscreen && ConfMan.hasKey("last_window_width", Common::ConfigManager::kApplicationDomain) &&
+	    ConfMan.hasKey("last_window_height", Common::ConfigManager::kApplicationDomain)) {
+		int storedWidth = ConfMan.getInt("last_window_width", Common::ConfigManager::kApplicationDomain);
+		int storedHeight = ConfMan.getInt("last_window_height", Common::ConfigManager::kApplicationDomain);
+		if (storedWidth > 0 && storedHeight > 0) { requestedWidth = storedWidth; requestedHeight = storedHeight; }
+	}
+	if (!createOrUpdateWindow(requestedWidth, requestedHeight, windowFlags))
 		return nullptr;
+	if (firstWindow && !_videoMode.fullscreen && ConfMan.hasKey("window_maximized") && ConfMan.getBool("window_maximized"))
+		SDL_MaximizeWindow(_window->getSDLWindow());
 	if (!_view) {
 		_view = SDL_Metal_CreateView(_window->getSDLWindow());
 		if (!_view || !_metal.attach(SDL_Metal_GetLayer(_view))) {
 			destroyingWindow();
-			warning("Metal 3 requires a supported Apple M1–M6 GPU and macOS 13 or later");
+			warning("Metal 4 requires a supported Apple M1–M6 GPU and macOS 26 or later");
 			return nullptr;
 		}
 	}
@@ -612,12 +763,12 @@ SDL_Surface *MetalSdlGraphicsManager::SDL_SetVideoMode(int width, int height, in
 	uint samples = _render3D && ConfMan.hasKey("antialiasing") ? MAX(1, ConfMan.getInt("antialiasing")) : 1;
 	if (!_metal.supportsSamples(samples))
 		samples = 1;
-	if (!_metal.resize(renderWidth, renderHeight, samples)) {
+	if (!_metal.resize(renderWidth, renderHeight, samples, _render3D)) {
 		destroyingWindow();
 		return nullptr;
 	}
 	{
-		_composition = _metal.createRenderTarget(_windowWidth, _windowHeight);
+		_composition = _metal.createRenderTarget(_windowWidth, _windowHeight, 1, Graphics::Metal::kTargetBGRA8, false, false);
 		if (!_composition) {
 			destroyingWindow();
 			return nullptr;
@@ -639,6 +790,25 @@ SDL_Surface *MetalSdlGraphicsManager::createOffscreenSurface(int width, int heig
 	return SDL_SetVideoMode(width, height, 32, 0);
 }
 
+void MetalSdlGraphicsManager::rememberWindowSize() {
+	SDL_Window *window = _window->getSDLWindow();
+	if (!window || _displayDisabled || _videoMode.fullscreen) return;
+	uint32 flags = SDL_GetWindowFlags(window);
+	if (flags & (SDL_WINDOW_FULLSCREEN | SDL_WINDOW_FULLSCREEN_DESKTOP)) return;
+	bool maximized = flags & SDL_WINDOW_MAXIMIZED;
+	if (!ConfMan.hasKey("window_maximized") || ConfMan.getBool("window_maximized") != maximized) {
+		ConfMan.setBool("window_maximized", maximized, Common::ConfigManager::kApplicationDomain); _windowGeometryChanged = true;
+	}
+	if (maximized) return;
+	int width, height; SDL_GetWindowSize(window, &width, &height);
+	if (width <= 0 || height <= 0) return;
+	if (!ConfMan.hasKey("last_window_width") || !ConfMan.hasKey("last_window_height") ||
+	    ConfMan.getInt("last_window_width") != width || ConfMan.getInt("last_window_height") != height) {
+		ConfMan.setInt("last_window_width", width, Common::ConfigManager::kApplicationDomain);
+		ConfMan.setInt("last_window_height", height, Common::ConfigManager::kApplicationDomain); _windowGeometryChanged = true;
+	}
+}
+
 void MetalSdlGraphicsManager::notifyResize(int width, int height) {
 	if (!_view)
 		return;
@@ -650,14 +820,14 @@ void MetalSdlGraphicsManager::notifyResize(int width, int height) {
 	_metal.setRenderTarget(nullptr);
 	uint renderWidth = width, renderHeight = height;
 	gameRenderSize(renderWidth, renderHeight);
-	if (!_metal.resize(renderWidth, renderHeight, _metal.sampleCount())) {
+	if (!_metal.resize(renderWidth, renderHeight, _metal.sampleCount(), _render3D)) {
 		warning("Metal: could not resize render target to %dx%d", width, height);
 		return;
 	}
 	{
 		_metal.setRenderTarget(nullptr);
 		_metal.flush(true);
-		Graphics::Metal::RenderTarget *resized = _metal.createRenderTarget(width, height);
+		Graphics::Metal::RenderTarget *resized = _metal.createRenderTarget(width, height, 1, Graphics::Metal::kTargetBGRA8, false, false);
 		if (!resized) {
 			warning("Metal: could not resize composition target");
 			return;
@@ -666,6 +836,7 @@ void MetalSdlGraphicsManager::notifyResize(int width, int height) {
 		_composition = resized;
 	}
 	handleResize(width, height);
+	rememberWindowSize();
 	// SurfaceSDL keeps a fixed game surface on window resize. Metal exposes
 	// the resized 3D target through getWidth()/getHeight(), so engines must
 	// receive EVENT_SCREEN_CHANGED to rebuild their viewports and input layout.
@@ -690,23 +861,23 @@ void MetalSdlGraphicsManager::SDL_UpdateRects(SDL_Surface *screen, int numrects,
 		delete _texture;
 		_texture = _metal.createTexture(surface);
 	} else {
-		_metal.updateTexture(*_texture, surface, Common::Rect(screen->w, screen->h));
+		for (int i = 0; i < numrects; ++i) {
+			const SDL_Rect &r = rects[i];
+			_metal.updateTexture(*_texture, surface, Common::Rect(r.x, r.y, r.x + r.w, r.y + r.h));
+		}
 	}
 	if (!_texture)
 		error("Metal: could not allocate screen texture");
 	_metal.clear(0, 0, 0);
-	if (_overlayVisible)
-		drawTexture(_texture, _overlayDrawRect, _videoMode.filtering, false);
+	if (_overlayVisible) drawOverlay();
 	else {
-		// CPU scalers have already composited their cursor and OSD into this surface.
-		bool cursorVisible = _cursorVisible; _cursorVisible = false;
 		drawGameTexture(_texture, _gameDrawRect);
-		_cursorVisible = cursorVisible;
+		drawInterface();
 	}
 }
 
 void MetalSdlGraphicsManager::drawTexture(Graphics::Metal::Texture *texture, const Common::Rect &rect,
-		bool linear, bool blend, float alpha, bool rotate) {
+		bool linear, bool blend, float alpha, bool rotate, bool invert) {
 	if (!texture)
 		return;
 	int width = _metal.width(), height = _metal.height();
@@ -730,6 +901,12 @@ void MetalSdlGraphicsManager::drawTexture(Graphics::Metal::Texture *texture, con
 	state.primitive = Graphics::Metal::kTriangleStrip;
 	state.linear = linear;
 	state.blend = true;
+	if (invert) {
+		state.srcRGB = Graphics::Metal::kOneMinusDstColor;
+		state.dstRGB = Graphics::Metal::kOneMinusSrcAlpha;
+		state.srcAlpha = Graphics::Metal::kBlendZero;
+		state.dstAlpha = Graphics::Metal::kBlendOne;
+	}
 	if (!blend) {
 		// The opaque OpenGL composition mode writes RGB and keeps target alpha.
 		state.blendColor[0] = state.blendColor[1] = state.blendColor[2] = 1;
@@ -762,6 +939,7 @@ void MetalSdlGraphicsManager::renderMetalImGui() {
 	_imGuiMetal->render(ImGui::GetDrawData());
 	ImGui::UpdatePlatformWindows();
 	ImGui::RenderPlatformWindowsDefault();
+	_imGuiMetal->finishPlatformWindows();
 }
 
 void MetalSdlGraphicsManager::destroyMetalImGui() {

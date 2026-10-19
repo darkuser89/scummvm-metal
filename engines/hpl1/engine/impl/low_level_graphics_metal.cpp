@@ -364,8 +364,8 @@ iVertexBuffer *LowLevelGraphicsMetal::CreateVertexBuffer(tVertexFlag flags, eVer
 }
 
 void LowLevelGraphicsMetal::drawVertices(const MetalShaderVertex *vertices, uint count,
-		const uint32 *indices, uint indexCount, eVertexBufferDrawType type) {
-	if (!count || !vertices || (indexCount && !indices)) return;
+		const uint32 *indices, uint indexCount, eVertexBufferDrawType type, const Graphics::Metal::GeometryBinding *geometry) {
+	if (!count || (!vertices && !(geometry && geometry->vertices)) || (indexCount && !indices && !(geometry && geometry->indices))) return;
 	matrixFloats(_uniforms.mvp, cMath::MatrixMul(_matrices[1], _matrices[0]));
 	matrixFloats(_uniforms.backendModelView, _matrices[0]);
 	for (uint i = 0; i < 8; ++i) matrixFloats(_uniforms.textureMatrices[i], _matrices[2 + i]);
@@ -415,8 +415,10 @@ void LowLevelGraphicsMetal::drawVertices(const MetalShaderVertex *vertices, uint
 	}
 	Graphics::Metal::DrawState state = _state;
 	state.primitive = type == eVertexBufferDrawType_Lines ? Graphics::Metal::kLines : Graphics::Metal::kTriangles;
+	Graphics::Metal::GeometryBinding actualGeometry = geometry ? *geometry : Graphics::Metal::GeometryBinding();
+	if (type == eVertexBufferDrawType_Quad) actualGeometry.indices = nullptr;
 	_metal->drawProgram(*program, vertices, count, sizeof(*vertices), indices, indexCount,
-		&uniforms, sizeof(uniforms), bindings, 8, state);
+		&uniforms, sizeof(uniforms), bindings, 8, state, nullptr, 0, &actualGeometry);
 }
 
 void LowLevelGraphicsMetal::DrawTri(const tVertexVec &vertices) { assert(vertices.size() == 3); DrawTri(vertices.data()); }

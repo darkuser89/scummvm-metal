@@ -552,7 +552,7 @@ extern "C" int scummvm_main(int argc, const char * const argv[]) {
 		ConfMan.registerDefault("dump_midi", true);
 	}
 
-#ifdef USE_OPENGL
+#if defined(USE_OPENGL) || defined(USE_METAL)
 	if (settings.contains("last_window_width")) {
 		ConfMan.setInt("last_window_width", atoi(settings["last_window_width"].c_str()), Common::ConfigManager::kApplicationDomain);
 		ConfMan.setInt("last_window_height", atoi(settings["last_window_height"].c_str()), Common::ConfigManager::kApplicationDomain);
